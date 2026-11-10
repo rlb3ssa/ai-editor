@@ -316,12 +316,13 @@ class LinhaFaixa(QWidget):
         # [ A1 ] | [ Codec/Channels ]
         #        | [ mudo solo volume ]
         hl = QHBoxLayout(cab)
-        hl.setContentsMargins(0, 3, 6, 3)
+        hl.setContentsMargins(0, 0, 6, 0)  # sem margem vertical: o divisor vai de ponta a ponta
         hl.setSpacing(0)
         nome = QLabel(f"A{idx + 1}")
         nome.setObjectName("nome_faixa")
         nome.setAlignment(Qt.AlignCenter)
         nome.setFixedWidth(36)
+        nome.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
         nome.setToolTip(info.get("title") or f"Faixa de áudio {idx + 1}")
         hl.addWidget(nome)
         divisor = QFrame()
@@ -330,8 +331,8 @@ class LinhaFaixa(QWidget):
         hl.addWidget(divisor)
         hl.addSpacing(6)
         cl = QVBoxLayout()
-        cl.setContentsMargins(0, 0, 0, 0)
-        cl.setSpacing(2)
+        cl.setContentsMargins(0, 4, 0, 1)  # controles colados embaixo
+        cl.setSpacing(0)
         hl.addLayout(cl, 1)
         # linha 1: detalhes centralizados ("Codec: aac    Channels: 2")
         campos = [("Codec", info.get("codec")), ("Channels", info.get("demux-channel-count")),
@@ -345,6 +346,7 @@ class LinhaFaixa(QWidget):
         if info.get("title"):
             rot.setToolTip(info["title"])
         cl.addWidget(rot)
+        cl.addStretch(1)
         # linha 2: mudo, solo e volume
         lin = QHBoxLayout()
         self.b_mudo = self._botao("volume-off", "Mudo", "mudo")
@@ -644,7 +646,14 @@ class Janela(QMainWindow):
         g_cen, cen = grupo()
         g_dir, dir_ = grupo()
         btn("folder-open-outline", "Abrir (Ctrl+O)", self.dialogo_abrir, destino=esq)
-        btn("information-outline", "Metadados do arquivo (Ctrl+I)", self.mostrar_info, destino=esq)
+        # botão de metadados sobre o vídeo, no canto superior esquerdo (fixo, como o contador de quadros)
+        self.b_info = btn("information-outline", "Metadados do arquivo (Ctrl+I)", self.mostrar_info,
+                          tam=18, papel="info_video", destino=None)
+        self.b_info.setParent(self.tela)
+        self.b_info.setAutoRaise(False)
+        self.b_info.setCursor(Qt.PointingHandCursor)
+        self.b_info.move(10, 10)
+        self.b_info.show()
         esq.addStretch(1)
         bl = alvo[0] = cen
         btn("skip-previous", "Início (Home)", lambda: self.pular(0))
@@ -1375,9 +1384,11 @@ QWidget#canto { background: #0d1117; border-right: 1px solid #21262d; }
 QLabel#tempo { color: #e6edf3; }
 QLabel#nome_faixa { color: #e6edf3; font-size: 16px; font-weight: 700; }
 QLabel#detalhe_faixa { font-size: 11px; }
-QFrame#divisor_faixa { background: #30363d; margin: 4px 0; }
+QFrame#divisor_faixa { background: #30363d; }
 QLineEdit#ir { background: #15171c; border: 1px solid #4fa3ff; border-radius: 4px; padding: 1px 2px; color: #e6edf3; }
 QLabel#sutil { color: #6e7681; }
+QToolButton#info_video { background: rgba(13, 17, 23, 170); border: none; border-radius: 4px; padding: 3px; }
+QToolButton#info_video:hover { background: rgba(48, 54, 61, 210); }
 QLabel#quadro { color: #e6edf3; background: rgba(13, 17, 23, 170); border-radius: 4px; padding: 3px 7px; }
 QLabel#versao { color: #8b949e; padding-right: 6px; }
 QLineEdit { background: #15171c; border: 1px solid #2f3540; border-radius: 6px; padding: 4px 6px; color: #c9d1d9; }
