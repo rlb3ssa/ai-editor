@@ -7,15 +7,18 @@ import os
 import sys
 from pathlib import Path
 
-os.environ.setdefault("QT_QPA_PLATFORM", "xcb")  # embutir o mpv via X11/XWayland
+# Em X11 o Qt usa EGL (e não GLX): é o que permite ao mpv decodificar por hardware (VAAPI) sem cópia.
+# Em Wayland o Qt roda nativo (o vídeo vai pela render API, não depende mais de X11).
+os.environ.setdefault("QT_XCB_GL_INTEGRATION", "xcb_egl")
 os.environ.setdefault("QT_API", "pyside6")
 
 import numpy as np
 from PySide6.QtCore import (QFileSystemWatcher, QObject, QPointF, QRectF, QRunnable, QSize, Qt, QThreadPool, QTimer,
                             Signal)
-from PySide6.QtGui import (QAction, QColor, QFont, QKeySequence, QPainter, QPalette, QPen,
+from PySide6.QtGui import (QAction, QGuiApplication, QOpenGLContext, QColor, QFont, QKeySequence, QPainter, QPalette, QPen,
                            QPolygonF, QShortcut)
 from PySide6.QtNetwork import QLocalServer
+from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtWidgets import (QApplication, QComboBox, QFileDialog, QFrame, QHBoxLayout, QLabel,
                                QLineEdit, QMainWindow, QMenu, QMessageBox, QScrollArea,
                                QScrollBar, QSlider, QSizePolicy, QToolButton, QVBoxLayout,
@@ -348,10 +351,25 @@ class _SinaisMpv(QObject):
 
 
 # ====================================================================== janela
-class TelaVideo(QWidget):
-    """Área nativa onde o mpv desenha. Roda = zoom no ponto do cursor; arrastar = mover a imagem;
-    duplo clique = voltar ao tamanho normal. (O mpv roda com input-cursor=no, então os eventos de
-    mouse da janela X dele sobem para este widget.)"""
+def _ponteiro_display() -> dict:
+    """Display nativo (X11 ou Wayland) do Qt, para o mpv usar decodificação por hardware com interop."""
+    try:
+        ni = QGuiApplication.instance().nativeInterface()
+        nome = type(ni).__name__
+        if nome == "QX11Application" and ni.display():
+            return {"x11_display": int(ni.display())}
+        if nome == "QWaylandApplication" and ni.display():
+            return {"wl_display": int(ni.display())}
+    except Exception as e:  # noqa: BLE001
+        print(f"[video] sem display nativo: {e}", file=sys.stderr)
+    return {}
+
+
+class TelaVideo(QOpenGLWidget):
+    """Área onde o mpv desenha via render API (OpenGL): funciona em X11 e Wayland.
+    Roda = zoom no ponto do cursor; arrastar = mover a imagem; duplo clique = voltar ao tamanho normal."""
+
+    _novo_quadro = Signal()
 
     ZOOM_MAX = 4.0  # log2 → 16x
 
@@ -361,8 +379,39 @@ class TelaVideo(QWidget):
         self.zoom = 0.0          # log2 da escala (video-zoom do mpv)
         self.pan = [0.0, 0.0]    # fração do tamanho do vídeo escalado (video-pan-x/y)
         self._arrasto = None
-        self.setAttribute(Qt.WA_NativeWindow)
-        self.setMouseTracking(False)
+        self.ctx = None
+        self._novo_quadro.connect(self.update, Qt.QueuedConnection)
+
+    # ---- render API do mpv
+    def initializeGL(self):
+        import mpv as _m
+
+        def gpa(_, nome):
+            c = QOpenGLContext.currentContext()
+            return int(c.getProcAddress(nome.decode())) if c else 0
+
+        self._gpa = _m.MpvGlGetProcAddressFn(gpa)  # manter referência (callback C)
+        self.ctx = _m.MpvRenderContext(self.janela.mpv, "opengl",
+                                       opengl_init_params={"get_proc_address": self._gpa},
+                                       **_ponteiro_display())
+        # chamado numa thread do mpv: só agenda a repintura na thread da interface
+        self.ctx.update_cb = self._novo_quadro.emit
+
+    def paintGL(self):
+        if not self.ctx:
+            return
+        r = self.devicePixelRatioF()
+        self.ctx.render(flip_y=True, opengl_fbo={"w": round(self.width() * r), "h": round(self.height() * r),
+                                                 "fbo": self.defaultFramebufferObject()})
+
+    def liberar(self):
+        """Precisa ser chamado antes de mpv.terminate()."""
+        if self.ctx:
+            self.makeCurrent()
+            self.ctx.update_cb = None
+            self.ctx.free()
+            self.ctx = None
+            self.doneCurrent()
 
     def _tamanho_base(self):
         """Tamanho (px lógicos) do vídeo encaixado na área, sem zoom."""
@@ -475,7 +524,6 @@ class Janela(QMainWindow):
 
         # vídeo
         self.tela = TelaVideo(self)
-        self.tela.setStyleSheet("background:black")
         self.tela.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.tela.setMinimumHeight(200)
         raiz.addWidget(self.tela, 1)
@@ -624,7 +672,7 @@ class Janela(QMainWindow):
         import mpv  # import tardio: precisa do locale numérico C
         global _mpv
         _mpv = mpv
-        self.mpv = mpv.MPV(wid=str(int(self.tela.winId())), vo="gpu", hwdec="auto-safe",
+        self.mpv = mpv.MPV(vo="libmpv", hwdec="auto-safe",
                            keep_open="always", hr_seek="yes", idle="yes", osc=False,
                            input_default_bindings=False, input_vo_keyboard=False,
                            input_cursor=False, cursor_autohide=False,
@@ -1020,8 +1068,7 @@ class Janela(QMainWindow):
             ini, fim = float(a["ini"]), float(a["fim"])
             self.visao._por(ini, max(fim - ini, 0.05))
         elif cmd == "capturar":
-            # print da janela renderizado pelo Qt (funciona mesmo atrás de outras janelas;
-            # a área do vídeo pode sair preta, pois quem desenha nela é o mpv)
+            # print da janela renderizado pelo Qt (inclui o vídeo; funciona mesmo atrás de outras janelas)
             destino = a.get("arquivo") or str(RUNTIME_DIR / "captura.png")
             self.grab().save(destino)
             return {"arquivo": destino}
@@ -1107,6 +1154,7 @@ class Janela(QMainWindow):
     def reiniciar_processo(self):
         estado = self._estado_retomada()
         try:
+            self.tela.liberar()
             self.mpv.terminate()
         except Exception:  # noqa: BLE001
             pass
@@ -1139,6 +1187,7 @@ class Janela(QMainWindow):
 
     def closeEvent(self, e):
         try:
+            self.tela.liberar()
             self.mpv.terminate()
         except Exception:  # noqa: BLE001
             pass

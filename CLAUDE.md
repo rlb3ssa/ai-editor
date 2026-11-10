@@ -38,8 +38,8 @@ e aparece na barra de status. Erros em tempo de execução: ver o log (stderr do
 ```bash
 .venv/bin/python -c "from ai_editor import cliente as c; print(c.enviar('estado'))"
 ```
-Comandos úteis: `estado`, `depurar` (props do mpv; `extras=[...]`), `capturar` (print da janela via Qt →
-`$XDG_RUNTIME_DIR/ai-editor-dev/captura.png`; a área do vídeo pode sair preta), `abrir`, `pausar`, `pular`,
+Comandos úteis: `estado`, `depurar` (props do mpv; `extras=[...]`), `capturar` (print da janela via Qt, inclusive o vídeo, mesmo com a janela atrás de outras →
+`$XDG_RUNTIME_DIR/ai-editor-dev/captura.png`), `abrir`, `pausar`, `pular`,
 `marcar`, `zoom_video`, `recarregar`, `sair`.
 
 ## Regras importantes
@@ -59,6 +59,9 @@ Comandos úteis: `estado`, `depurar` (props do mpv; `extras=[...]`), `capturar` 
   (por baixo: `_get_property(prop, mpv.lazy_decoder)` / `_set_property`).
 - libmpv exige `locale.setlocale(LC_NUMERIC, "C")` antes de criar o `MPV`.
 - PySide6 6.12 removeu alguns enums curtos (ex.: `Qt.WA_DontCreateWindowContents`); confira com `hasattr`.
+- Vídeo: render API do libmpv (`vo=libmpv`) num `QOpenGLWidget` (`TelaVideo`). Em X11 o Qt usa EGL
+  (`QT_XCB_GL_INTEGRATION=xcb_egl`) e o display nativo é passado ao mpv → VAAPI com interop.
+  `update_cb` vem de outra thread: só emitir sinal. `tela.liberar()` antes de `mpv.terminate()`.
 - Mix de várias faixas de áudio: `lavfi-complex` com `amix=normalize=0`.
 - Corte preciso: uma entrada por trecho (`-ss a -t d -i arq`) + `concat` no `filter_complex`, reaplicando as
   tags das faixas (idioma/título). O modo rápido (`-c copy`) não é exato no quadro.

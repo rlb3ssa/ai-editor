@@ -50,16 +50,16 @@ Claude (Code/Desktop) ──stdio/MCP──> claude-player-mcp ──socket Unix
 - Arquivos só de áudio escondem a área de vídeo e aumentam as ondas.
 
 ### 2.5 Limitações conhecidas
-- Vídeo embutido por `wid` (janela X11): **não funciona em Wayland**.
 - Depende de Python, libmpv, ffmpeg, mediainfo e exiftool instalados no sistema.
 - Zoom/arraste do vídeo ainda não validado com mouse real.
+- Wayland ainda não testado numa sessão Wayland real.
 
 ## 3. Roadmap
 
 ### Fase 1 — Base portátil (Linux)
 - [x] Renomear pacote/comandos para `ai-editor` / `ai-editor-mcp`.
 - [x] Modo dev: instância separada (`ai-editor-dev`) com recarga automática ao salvar código.
-- [ ] Trocar o embutimento por `wid` pela **render API do libmpv** num `QOpenGLWidget` (X11 + Wayland, mouse nativo do Qt).
+- [x] Trocar o embutimento por `wid` pela **render API do libmpv** num `QOpenGLWidget` (X11 + Wayland, mouse nativo do Qt). VAAPI com interop confirmado em X11.
 - [ ] Localizar binários primeiro dentro do pacote e depois no sistema (`ffmpeg`, `ffprobe`, `mediainfo`, `exiftool`, `libmpv`).
 - [ ] Comando `ai-editor --instalar`: registra o MCP no Claude Code e no Claude Desktop, cria o `.desktop` e associa tipos MIME (opcional).
 - [ ] `--desinstalar` simétrico.
