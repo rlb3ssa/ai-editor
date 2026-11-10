@@ -477,8 +477,13 @@ class TelaVideo(QOpenGLWidget):
         if not self.ctx:
             return
         r = self.devicePixelRatioF()
+        fbo = self.defaultFramebufferObject()
         self.ctx.render(flip_y=True, opengl_fbo={"w": round(self.width() * r), "h": round(self.height() * r),
-                                                 "fbo": self.defaultFramebufferObject()})
+                                                 "fbo": fbo})
+        # O mpv termina com o framebuffer 0 ligado. Em seguida o Qt descarta depth/stencil do FBO do widget
+        # (glInvalidateFramebuffer com GL_DEPTH_ATTACHMENT), o que é inválido no framebuffer 0 →
+        # INVALID_ENUM, que o mpv lia depois como "after creating texture". Religar o FBO do widget resolve.
+        self.context().functions().glBindFramebuffer(0x8D40, fbo)  # GL_FRAMEBUFFER
 
     def liberar(self):
         """Precisa ser chamado antes de mpv.terminate()."""
