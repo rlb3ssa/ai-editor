@@ -8,6 +8,7 @@ import datetime as _dt
 import functools
 import hashlib
 import json
+import math
 import os
 import re
 import shlex
@@ -322,9 +323,11 @@ def _tags_faixa(stream: dict, saida_sel: str) -> list[str]:
     return out
 
 
-def _cmd_preciso(entrada: Path, probe: dict, trechos: list[tuple[float, float]], saida: Path) -> list[str]:
+def _cmd_preciso(entrada: Path, probe: dict, trechos: list[tuple[float, float]], saida: Path,
+                 args_video: list[str] | None = None) -> list[str]:
     """Corte exato: cada trecho é uma entrada com seek próprio; trim/concat num único filtro,
-    mantendo áudio e vídeo sincronizados ao quadro em todas as faixas (ver `_segmentos_av`)."""
+    mantendo áudio e vídeo sincronizados ao quadro em todas as faixas (ver `_segmentos_av`).
+    args_video: codec de vídeo (padrão codec_video da extensão; o dividir usa _args_video_edicao)."""
     vids = [s for s in probe["streams"] if s.get("codec_type") == "video"
             and not s.get("disposition", {}).get("attached_pic")]
     auds = faixas_audio(probe)
@@ -340,10 +343,11 @@ def _cmd_preciso(entrada: Path, probe: dict, trechos: list[tuple[float, float]],
         # -t com folga só limita a decodificação; o fim exato vem do trim/atrim
         cmd += ["-ss", f"{a6:.6f}", "-t", f"{b6 - a6 + _FOLGA_T:.6f}"] + dec + ["-i", str(entrada)]
     taxa = _taxa_video(vids[0]) if tem_v else ""
-    grafo = _segmentos_av(segs, auds, taxa if tem_v else None, lambda i: f"[{i}:V:0]")
+    grafo = _segmentos_av(segs, auds, taxa if tem_v else None, lambda i: f"[{i}:V:0]",
+                          atraso=_atraso_video(probe, vids[0]) if tem_v else 0.0)
     cmd += ["-filter_complex", ";".join(grafo)]
     if tem_v:
-        cmd += ["-map", "[vc]"] + codec_video(saida.suffix) + _tags_faixa(vids[0], "s:v:0")
+        cmd += ["-map", "[vc]"] + (args_video or codec_video(saida.suffix)) + _tags_faixa(vids[0], "s:v:0")
     for k, s in enumerate(auds):
         cmd += ["-map", f"[ao{k}]"] + _tags_faixa(s, f"s:a:{k}")
     if auds:
@@ -353,6 +357,14 @@ def _cmd_preciso(entrada: Path, probe: dict, trechos: list[tuple[float, float]],
         cmd += ["-map", "0:t?", "-c:t", "copy"]  # fontes das legendas ASS do MKV
     cmd += ["-map_metadata", "0", "-map_chapters", "-1", str(saida)]
     return cmd
+
+
+def _atraso_video(probe: dict, v: dict) -> float:
+    """start_time do vídeo menos o do contêiner (o pts do 1º quadro no -filter_complex; MKV costuma ter 0,021 s)."""
+    try:
+        return max(0.0, float(v.get("start_time") or 0) - float(probe.get("format", {}).get("start_time") or 0))
+    except ValueError:
+        return 0.0
 
 
 _FOLGA_T = 0.5  # s a mais no -t das entradas por trecho (o corte exato é feito por trim/atrim)
@@ -380,8 +392,13 @@ def _taxa_video(v: dict) -> str:
     return taxa
 
 
+def _fase_quadro(x: float) -> float:
+    """Parte fracionária de x (em quadros) em [−0,001, 0,999): perto de inteiro conta como 0."""
+    return x - math.floor(x + 1e-3)
+
+
 def _segmentos_av(segs: list[dict], auds: list[dict], taxa: str | None, ent_video,
-                  faixas: list[int] | None = None) -> list[str]:
+                  faixas: list[int] | None = None, atraso: float = 0.0) -> list[str]:
     """Filtros de N segmentos (entrada i = `-ss a -t ... -i` do segmento i) + concat → [vc] e [ao0], [ao1]...
     seg: {"a", "b" (None = até o fim), "fator", "manter_tom", "silenciar"} ou {"congelar": True, "d": s}
     (entrada de congelar: começa meio quadro antes do quadro desejado).
@@ -394,12 +411,26 @@ def _segmentos_av(segs: list[dict], auds: list[dict], taxa: str | None, ent_vide
       duração exata (aresample first_pts=0 preenche atraso no início, apad no fim) e o vídeo vai para a
       grade `fps` do segmento com exatamente round(T_fim·fps) − round(T_ini·fps) quadros (erro ≤ ½ quadro,
       sem acumular).
+    - quadro fora da grade do segmento (MKV com vídeo em 0,021 s, corte entre dois quadros): com -ss a o 1º
+      quadro tem pts (atraso + k/fps − a), uma fração φ de quadro; o fps (round=near) o empurrava para o slot 1 e
+      duplicava (cada corte perdia um quadro e repetia outro). Por isso o vídeo é adiantado em φ (< 1 quadro, sem
+      acumular) e os limites contam quadros na fase do segmento: ceil(t·fps − φ) = nº de quadros que COMEÇAM
+      antes de t. Cada quadro fica no segmento em que começa. atraso = start_time do vídeo − o do contêiner.
     ent_video(i) → rótulo de entrada do vídeo do segmento i já com prefixo (ex.: normalização de SAR).
     faixas: índice de cada item de `auds` na entrada (`[i:a:N]`); padrão 0, 1, 2... As saídas são sempre
     [ao0], [ao1]... na ordem de `auds`."""
     fps = _fps_stream({"r_frame_rate": taxa}) if taxa and "/" in taxa else float(taxa or 0)
     grafo, cv, ca = [], "", ""
     t_saida = 0.0
+
+    def fase(sg: dict) -> float | None:  # φ em quadros (None: congelar/velocidade, grade por arredondamento)
+        if not fps or "congelar" in sg or float(sg.get("fator") or 1.0) != 1:
+            return None
+        return _fase_quadro((atraso - float(sg.get("a") or 0.0)) * fps)
+
+    def limite(t: float, ph: float | None) -> int:  # quadros da saída antes de t
+        return round(t * fps) if ph is None else math.ceil(t * fps - ph - 1e-3)
+
     for i, sg in enumerate(segs):
         ultimo = sg.get("b") is None and "congelar" not in sg
         if "congelar" in sg:
@@ -409,11 +440,15 @@ def _segmentos_av(segs: list[dict], auds: list[dict], taxa: str | None, ent_vide
             fator = float(sg.get("fator") or 1.0)
             d_out = d_src / fator if d_src is not None else None
         if taxa:
+            ph = fase(sg)
+            # limite com o próximo segmento na fase DELE (soma telescópica: o total não acumula erro)
+            ph_fim = fase(segs[i + 1]) if i + 1 < len(segs) else ph
+            adianta = f"setpts=PTS-{ph / fps:.6f}/TB," if ph and abs(ph) > 1e-3 else ""
             if d_out is not None:
-                nq = round((t_saida + d_out) * fps) - round(t_saida * fps)
-                cauda = f"fps={taxa}:start_time=0,tpad=stop_mode=clone:stop=-1,trim=end_frame={max(nq, 1)}"
+                nq = limite(t_saida + d_out, ph_fim) - limite(t_saida, ph)
+                cauda = f"{adianta}fps={taxa}:start_time=0,tpad=stop_mode=clone:stop=-1,trim=end_frame={max(nq, 1)}"
             else:
-                cauda = f"fps={taxa}:start_time=0"
+                cauda = f"{adianta}fps={taxa}:start_time=0"
             if "congelar" in sg:
                 grafo.append(f"{ent_video(i)}trim=end_frame=1,setpts=PTS-STARTPTS,{cauda}[v{i}]")
             else:
@@ -1570,7 +1605,8 @@ def exportar(arquivo: Path | str, predefinicao: str | None = None, formato: str 
         if n > 1:
             # mesmos filtros do corte preciso: sincronia exata, vídeo com nº exato de quadros por trecho
             grafo += _segmentos_av(segs, [auds[k] for k in ia], _taxa_video(vids[0]) if tem_v else None,
-                                   lambda i: f"[{i}:V:0]", faixas=ia)
+                                   lambda i: f"[{i}:V:0]", faixas=ia,
+                                   atraso=_atraso_video(probe, vids[0]) if tem_v else 0.0)
             v_ent, a_map = "vc", [f"[ao{j}]" for j in range(len(ia))]
         else:
             v_ent, a_map = "0:V:0", [f"0:a:{k}" for k in ia]
@@ -2286,7 +2322,8 @@ def _editar_linha_tempo(doc: Documento, segmentos: list[dict], descricao: str, p
         segs.append(sg)
         dur_saida += ((b if b is not None else info["dur"]) - a) / float(sg.get("fator") or 1.0)
     n = len(segmentos)
-    grafo = _segmentos_av(segs, auds, info["taxa"], lambda i: _com_pre(info, f"{i}:V:0"))
+    grafo = _segmentos_av(segs, auds, info["taxa"], lambda i: _com_pre(info, f"{i}:V:0"),
+                          atraso=info["atraso_video"])
     par = "" if info["w"] % 2 == 0 and info["h"] % 2 == 0 else "," + _PAR_FILTRO
     grafo.append(f"[vc]fps={info['taxa']}{par}[vo]")  # volta a ter fps constante
     if copiar_audio:
@@ -3100,14 +3137,14 @@ def _trocar_args(cmd: list[str], de: list[str], para: list[str]) -> bool:
     return False
 
 
-def _limpar_lotes_orfaos(pasta: Path) -> list[str]:
+def _limpar_lotes_orfaos(pasta: Path, prefixo: str = "lotes-") -> list[str]:
     """Apaga pastas `lotes-*` (partes do corte em lotes) esquecidas em `.versoes/` por um corte interrompido
     (processo morto antes de o TemporaryDirectory limpar): sem escrita há 10 min (`_ORFAO_S`), olhando a
     pasta e os arquivos dentro (um corte ativo grava as partes sem parar)."""
     import time as _time
     apagadas = []
     try:
-        pastas = [d for d in pasta.iterdir() if d.name.startswith("lotes-") and d.is_dir()]
+        pastas = [d for d in pasta.iterdir() if d.name.startswith(prefixo) and d.is_dir()]
     except OSError:
         return apagadas
     agora = _time.time()
@@ -3467,14 +3504,15 @@ def _fonte(p: Path) -> dict:
     else:
         info = {"probe": probe, "v": None, "auds": faixas_audio(probe), "dur": duracao(probe), "pre": "",
                 "dec": [], "w": 0, "h": 0, "fps": 0.0, "taxa": "", "pix_fmt": "", "legendas": False,
-                "anexos": False}
+                "anexos": False, "atraso_video": 0.0}
     info["caminho"] = p
     return info
 
 
 def _esc_ffmeta(s) -> str:
     """Escape de chave/valor no formato FFMETADATA: = ; # \\ e quebra de linha ganham barra invertida."""
-    return re.sub(r"([=;#\\\n])", r"\\\1", str(s))
+    s = str(s).replace("\r\n", "\n").replace("\r", "\n")
+    return re.sub(r"([=;#\\\n])", r"\\\1", s)
 
 
 def _limpar_capitulos(caps: list[tuple[float, str]], dur: float) -> list[tuple[float, str]]:
@@ -3513,24 +3551,46 @@ def ler_capitulos(arquivo: Path | str, probe: dict | None = None) -> list[dict]:
     return caps
 
 
-def _alinhar(t: float, fps: float) -> float:
-    """Tempo no início do quadro mais próximo (sem fps, o próprio tempo)."""
-    return round(t * fps) / fps if fps else t
+def _alinhar(t: float, fps: float, atraso: float = 0.0) -> float:
+    """Tempo no início do quadro mais próximo, na grade do vídeo (quadro k em atraso + k/fps; MKV costuma ter
+    atraso 0,021 s). Sem fps, o próprio tempo."""
+    if not fps:
+        return t
+    return max(0.0, atraso + round((t - atraso) * fps) / fps)
+
+
+_MARGEM_SEEK = 0.0005  # s antes do início do quadro no -ss: tempos guardados em ms (MKV) não perdem o quadro
 
 
 # ---- juntar
+_LOTE_JUNTAR = 6  # entradas por comando na junção (cada uma abre um decodificador; mais que isso vai em lotes)
+_HDR_TRC_JUNTAR = ("smpte2084", "arib-std-b67")
+# HDR (PQ/HLG) → SDR BT.709: linear, primárias BT.709, tonemap hable
+_TONEMAP_SDR = ("zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=hable:desat=0,"
+                "zscale=t=bt709:m=bt709:r=tv")
+
+
+def _e_hdr(v: dict | None) -> bool:
+    return bool(v) and str(v.get("color_transfer") or "") in _HDR_TRC_JUNTAR
+
+
 def juntar_arquivos(doc: Documento, arquivos: list, posicao="fim", transicao: str | None = None,
                     duracao_transicao: float = 1.0, so_audio: str = "erro", capitulos: bool = False,
                     estado: dict | None = None, progresso=None) -> dict:
     """Emenda outros arquivos ao documento (nova versão), normalizando tudo para o formato do documento:
     resolução (escala mantendo a proporção + barras pretas), SAR 1, fps, formato de pixel, taxa de amostragem e
-    canais. Arquivo sem áudio entra com silêncio; arquivo só de áudio num documento com vídeo dá erro
-    (so_audio='preto' põe imagem preta). Documento só de áudio: junta só os áudios.
-    posicao: 'fim' | 'inicio' | um tempo (parse_tempo) → divide o documento ali e encaixa os arquivos.
+    canais; HDR → SDR (zscale+tonemap) quando o documento é SDR. Arquivo sem áudio entra com silêncio; arquivo
+    só de áudio num documento com vídeo dá erro (so_audio='preto' põe imagem preta). Documento só de áudio:
+    junta só os áudios.
+    posicao: 'fim' | 'inicio' | um tempo (parse_tempo) → divide o documento ali (no início de um quadro) e
+    encaixa os arquivos.
     transicao: None/'corte' | 'fade' (escurece e clareia; duração total igual) | 'crossfade' (mistura imagem e
     som com xfade/acrossfade; cada emenda encurta o total em duracao_transicao).
     capitulos=True: um capítulo no início de cada arquivo emendado (os capítulos do documento são mantidos,
-    deslocados)."""
+    deslocados).
+    Exatidão: cada segmento tem nº inteiro de quadros, e o vídeo fora da grade (MKV com vídeo em 0,021 s) é
+    adiantado a fração de quadro, com o áudio cortado junto (ver _segmentos_av). Mais de _LOTE_JUNTAR entradas:
+    em lotes (partes intermediárias), para não abrir todos os decodificadores de uma vez."""
     if not arquivos:
         raise ValueError("passe pelo menos um arquivo em `arquivos`")
     if isinstance(arquivos, (str, Path)):
@@ -3577,9 +3637,31 @@ def juntar_arquivos(doc: Documento, arquivos: list, posicao="fim", transicao: st
             alvo_a.append((int(com_audio[0].get("sample_rate") or 48000), "stereo" if canais == 2 else "mono",
                            canais))
             avisos.append("o documento não tinha áudio: ganhou uma faixa (silêncio na parte dele)")
+    na = len(alvo_a)
 
-    # ---- onde entra
+    # ---- HDR x SDR
+    tonemap: set[int] = set()  # id() dos arquivos HDR convertidos para SDR
+    if tem_v:
+        filtros = binarios._lista_ffmpeg("filters")
+        pode_tm = {"zscale", "tonemap"} <= filtros
+        hdr_doc = _e_hdr(ref["v"])
+        hdr_f = [f for f in outros if _e_hdr(f["v"])]
+        sdr_f = [f for f in outros if f["v"] is not None and not _e_hdr(f["v"])]
+        if not hdr_doc and hdr_f:
+            if pode_tm:
+                tonemap = {id(f) for f in hdr_f}
+                avisos.append("HDR convertido para SDR (zscale + tonemap hable) para combinar com o documento: "
+                              + ", ".join(f["caminho"].name for f in hdr_f))
+            else:
+                avisos.append("HDR emendado num documento SDR SEM conversão (o ffmpeg não tem zscale/tonemap): as "
+                              "cores desses trechos vão sair lavadas: " + ", ".join(f["caminho"].name for f in hdr_f))
+        if hdr_doc and sdr_f:
+            avisos.append("SDR emendado num documento HDR sem conversão (os trechos SDR são marcados como HDR e "
+                          "podem sair com cores/brilho errados): " + ", ".join(f["caminho"].name for f in sdr_f))
+
+    # ---- onde entra (no início de um quadro, na grade do vídeo: quadro k em atraso + k/fps)
     dur_doc = ref["dur"]
+    atr_doc = ref.get("atraso_video", 0.0) if tem_v else 0.0
     est = dict(estado or {})
     est.setdefault("duracao", dur_doc)
     pos_txt = str(posicao).lower().strip() if posicao is not None else "fim"
@@ -3588,8 +3670,7 @@ def juntar_arquivos(doc: Documento, arquivos: list, posicao="fim", transicao: st
     elif pos_txt in ("inicio", "início", "comeco", "começo", "antes", "start"):
         t_ins = 0.0
     else:
-        t_ins = min(max(0.0, parse_tempo(posicao, est)), dur_doc)
-    t_ins = _alinhar(t_ins, fps)
+        t_ins = _alinhar(min(max(0.0, parse_tempo(posicao, est)), dur_doc), fps, atr_doc)
     pecas_doc_antes = t_ins > 0.05
     pecas_doc_depois = dur_doc - t_ins > 0.05
     if not pecas_doc_antes:
@@ -3597,18 +3678,31 @@ def juntar_arquivos(doc: Documento, arquivos: list, posicao="fim", transicao: st
     if not pecas_doc_depois:
         t_ins = dur_doc
 
-    # segmentos na ordem final: {"info", "a" (seek), "d" (duração), "rotulo"}
+    # segmentos na ordem final: {"info", "ss" (seek), "t" (limite de leitura), "span", "d" (duração), ...}
+    margem = _MARGEM_SEEK if fps else 0.0  # só áudio: o próprio tempo
     segs: list[dict] = []
     if pecas_doc_antes:
-        segs.append({"info": ref, "a": None, "d": t_ins, "rotulo": doc.original.stem, "doc": True, "inicio_doc": 0.0})
+        segs.append({"info": ref, "ss": None, "t": t_ins + _FOLGA_T, "span": t_ins, "rotulo": doc.original.stem,
+                     "doc": True, "inicio_doc": 0.0})
     for f in outros:
-        segs.append({"info": f, "a": None, "d": f["dur"], "rotulo": f["caminho"].stem, "doc": False})
+        segs.append({"info": f, "ss": None, "t": None, "span": f["dur"], "rotulo": f["caminho"].stem, "doc": False})
     if pecas_doc_depois:
-        segs.append({"info": ref, "a": t_ins if t_ins > 0 else None, "d": dur_doc - t_ins,
-                     "rotulo": doc.original.stem, "doc": True, "inicio_doc": t_ins})
-    for sg in segs:  # durações em quadros inteiros: áudio e vídeo de cada segmento com o mesmo tamanho exato
-        if fps:
-            sg["d"] = max(1, round(sg["d"] * fps)) / fps
+        ss = max(0.0, t_ins - margem) if t_ins > 0 else None
+        segs.append({"info": ref, "ss": ss, "t": None, "span": dur_doc - (ss or 0.0), "rotulo": doc.original.stem,
+                     "doc": True, "inicio_doc": t_ins})
+    n = len(segs)
+    for i, sg in enumerate(segs):
+        inf = sg["info"]
+        # fração de quadro do 1º quadro (pts = atraso − seek): o vídeo é adiantado e o áudio cortado junto
+        delta = 0.0
+        if fps and inf["v"] is not None:
+            ph = _fase_quadro((inf.get("atraso_video", 0.0) - (sg["ss"] or 0.0)) * fps)
+            delta = ph / fps if ph > 1e-3 else 0.0
+        sg["delta"] = delta
+        # duração em quadros inteiros: áudio e vídeo de cada segmento com o mesmo tamanho exato
+        sg["d"] = max(1, round((sg["span"] - delta) * fps)) / fps if fps else sg["span"]
+        sg["fade_in"], sg["fade_out"] = i > 0, i < n - 1
+        sg["tonemap"] = id(inf) in tonemap
 
     d_tr = 0.0
     if tipo_tr != "corte":
@@ -3620,87 +3714,81 @@ def juntar_arquivos(doc: Documento, arquivos: list, posicao="fim", transicao: st
             raise ValueError(f"duracao_transicao precisa ser > 0 e no máximo metade do menor trecho "
                              f"({menor / 2:.2f} s)")
 
-    # ---- entradas e grafo
-    cmd = FFMPEG[:]
-    # um decodificador aberto por segmento (todos ao mesmo tempo): 2 threads cada limita a memória
-    # (crossfade 720p com 3 entradas: 630 → ~400 MB)
-    poucas = len(segs) > 1
-    grafo: list[str] = []
-    n = len(segs)
-    for i, sg in enumerate(segs):
-        inf = sg["info"]
-        thr = ["-threads", "2"] if poucas else []
-        if sg["doc"]:
-            if sg["a"] is not None:  # 0,4 ms antes do quadro: o primeiro quadro lido é exatamente o do ponto
-                cmd += thr + ["-ss", f"{max(0.0, sg['a'] - 0.0004):.6f}"] + inf["dec"] + ["-i", str(inf["caminho"])]
-            else:
-                cmd += thr + ["-t", f"{sg['d'] - 0.0004:.6f}"] + inf["dec"] + ["-i", str(inf["caminho"])]
-        else:
-            cmd += thr + inf["dec"] + ["-i", str(inf["caminho"])]
-        D = sg["d"]
-        fades_v, fades_a = "", ""
-        if tipo_tr == "fade":
-            h = d_tr / 2
-            if i > 0:
-                fades_v += f",fade=t=in:st=0:d={h:.6f}"
-                fades_a += f",afade=t=in:st=0:d={h:.6f}"
-            if i < n - 1:
-                fades_v += f",fade=t=out:st={D - h:.6f}:d={h:.6f}"
-                fades_a += f",afade=t=out:st={D - h:.6f}:d={h:.6f}"
-        if tem_v:
-            if inf["v"] is None:  # só áudio → imagem preta
-                grafo.append(f"color=c=black:s={W}x{H}:r={ref['taxa']}:d={D:.6f},format={pix},setsar=1"
-                             f"{fades_v}[v{i}]")
-            else:
-                cadeia = [inf["pre"]] if inf["pre"] else []
-                if (inf["w"], inf["h"]) != (W, H):
-                    cadeia.append(f"scale={W}:{H}:force_original_aspect_ratio=decrease:force_divisible_by=2:"
-                                  f"flags=lanczos,pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black")
-                # fps com start_time=0: completa o começo (vídeo que começa depois do áudio); tpad+trim: o fim
-                cadeia += ["setsar=1", f"fps={ref['taxa']}:start_time=0", f"format={pix}",
-                           f"tpad=stop_mode=clone:stop_duration={D:.6f}", f"trim=end={D:.6f}",
-                           "setpts=PTS-STARTPTS"]
-                grafo.append(f"[{i}:V:0]" + ",".join(cadeia) + fades_v + f"[v{i}]")
-        for k, (sr, lay, ch) in enumerate(alvo_a):
-            if k < len(inf["auds"]):
-                s = inf["auds"][k]
-                mono_estereo = int(s.get("channels") or 0) == 1 and ch == 2
-                # mono → estéreo: o mesmo sinal nos dois lados (o aformat sozinho poria -3 dB); senão só renomeia
-                # os canais para o layout padrão (channelmap, sem mixagem) antes do aformat
-                pre_a = "pan=stereo|c0=c0|c1=c0," if mono_estereo else _filtro_layout(s)
-                grafo.append(f"[{i}:a:{k}]{pre_a}aresample={sr}:first_pts=0,"
-                             f"aformat=sample_fmts=fltp:sample_rates={sr}:channel_layouts={lay},"
-                             f"apad,atrim=end={D:.6f},asetpts=PTS-STARTPTS{fades_a}[a{k}_{i}]")
-            else:
-                grafo.append(f"anullsrc=r={sr}:cl={lay},aformat=sample_fmts=fltp,atrim=end={D:.6f}[a{k}_{i}]")
-    na = len(alvo_a)
-    if tipo_tr == "crossfade":
-        pv, acc = "v0", segs[0]["d"]
-        pa = [f"a{k}_0" for k in range(na)]
-        inicios = [0.0]
-        for i in range(1, n):
-            off = acc - d_tr
-            inicios.append(off)
+    def montar(lista: list[dict], cross: bool) -> tuple[list[str], list[str], str | None, list[str], float]:
+        """Entradas, grafo, rótulo do vídeo, rótulos do áudio e duração de uma sequência de segmentos."""
+        cmd_in: list[str] = []
+        grafo: list[str] = []
+        m = len(lista)
+        for i, sg in enumerate(lista):
+            inf = sg["info"]
+            thr = ["-threads", "2"] if m > 1 else []
+            cmd_in += thr + (["-ss", f"{sg['ss']:.6f}"] if sg["ss"] is not None else []) \
+                + (["-t", f"{sg['t']:.6f}"] if sg["t"] is not None else []) + inf["dec"] + ["-i", str(inf["caminho"])]
+            D, nq = sg["d"], max(1, round(sg["d"] * fps)) if fps else 0
+            fades_v, fades_a = "", ""
+            if tipo_tr == "fade" and not sg.get("pronto"):
+                h = d_tr / 2
+                if sg["fade_in"]:
+                    fades_v += f",fade=t=in:st=0:d={h:.6f}"
+                    fades_a += f",afade=t=in:st=0:d={h:.6f}"
+                if sg["fade_out"]:
+                    fades_v += f",fade=t=out:st={D - h:.6f}:d={h:.6f}"
+                    fades_a += f",afade=t=out:st={D - h:.6f}:d={h:.6f}"
             if tem_v:
-                grafo.append(f"[{pv}][v{i}]xfade=transition=fade:duration={d_tr:.6f}:offset={off:.6f}[x{i}]")
-                pv = f"x{i}"
-            for k in range(na):
-                grafo.append(f"[{pa[k]}][a{k}_{i}]acrossfade=d={d_tr:.6f}:c1=tri:c2=tri[ax{k}_{i}]")
-                pa[k] = f"ax{k}_{i}"
-            acc += segs[i]["d"] - d_tr
-        dur_saida = acc
-        rot_v = pv
-        rot_a = pa
-    else:
-        conc = "".join((f"[v{i}]" if tem_v else "") + "".join(f"[a{k}_{i}]" for k in range(na)) for i in range(n))
+                if inf["v"] is None:  # só áudio → imagem preta
+                    grafo.append(f"color=c=black:s={W}x{H}:r={ref['taxa']}:d={D:.6f},format={pix},setsar=1"
+                                 f"{fades_v}[v{i}]")
+                else:
+                    cadeia = [inf["pre"]] if inf["pre"] else []
+                    if sg["tonemap"]:
+                        cadeia.append(_TONEMAP_SDR)
+                    if sg["delta"]:
+                        cadeia.append(f"setpts=PTS-{sg['delta']:.6f}/TB")
+                    if (inf["w"], inf["h"]) != (W, H):
+                        cadeia.append(f"scale={W}:{H}:force_original_aspect_ratio=decrease:force_divisible_by=2:"
+                                      f"flags=lanczos,pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black")
+                    # fps com start_time=0: completa o começo (vídeo que começa depois do áudio); tpad+trim: o
+                    # fim, com o nº exato de quadros
+                    cadeia += ["setsar=1", f"fps={ref['taxa']}:start_time=0", f"format={pix}",
+                               f"tpad=stop_mode=clone:stop_duration={D:.6f}", f"trim=end_frame={nq}",
+                               "setpts=PTS-STARTPTS"]
+                    grafo.append(f"[{i}:V:0]" + ",".join(cadeia) + fades_v + f"[v{i}]")
+            corta = f"atrim=start={sg['delta']:.6f},asetpts=PTS-STARTPTS," if sg["delta"] else ""
+            for k, (sr, lay, ch) in enumerate(alvo_a):
+                if k < len(inf["auds"]):
+                    s = inf["auds"][k]
+                    mono_estereo = int(s.get("channels") or 0) == 1 and ch == 2
+                    # mono → estéreo: o mesmo sinal nos dois lados (o aformat sozinho poria -3 dB); senão só
+                    # renomeia os canais para o layout padrão (channelmap, sem mixagem) antes do aformat
+                    pre_a = "pan=stereo|c0=c0|c1=c0," if mono_estereo else _filtro_layout(s)
+                    grafo.append(f"[{i}:a:{k}]{pre_a}aresample={sr}:first_pts=0,"
+                                 f"aformat=sample_fmts=fltp:sample_rates={sr}:channel_layouts={lay},{corta}"
+                                 f"apad,atrim=end={D:.6f},asetpts=PTS-STARTPTS{fades_a}[a{k}_{i}]")
+                else:
+                    grafo.append(f"anullsrc=r={sr}:cl={lay},aformat=sample_fmts=fltp,atrim=end={D:.6f}[a{k}_{i}]")
+        if cross:
+            pv, acc = "v0", lista[0]["d"]
+            pa = [f"a{k}_0" for k in range(na)]
+            for i in range(1, m):
+                if tem_v:
+                    grafo.append(f"[{pv}][v{i}]xfade=transition=fade:duration={d_tr:.6f}:offset={acc - d_tr:.6f}[x{i}]")
+                    pv = f"x{i}"
+                for k in range(na):
+                    grafo.append(f"[{pa[k]}][a{k}_{i}]acrossfade=d={d_tr:.6f}:c1=tri:c2=tri[ax{k}_{i}]")
+                    pa[k] = f"ax{k}_{i}"
+                acc += lista[i]["d"] - d_tr
+            return cmd_in, grafo, (pv if tem_v else None), pa, acc
+        conc = "".join((f"[v{i}]" if tem_v else "") + "".join(f"[a{k}_{i}]" for k in range(na)) for i in range(m))
         sai = ("[vc]" if tem_v else "") + "".join(f"[ac{k}]" for k in range(na))
-        grafo.append(f"{conc}concat=n={n}:v={int(tem_v)}:a={na}{sai}")
-        rot_v, rot_a = "vc", [f"ac{k}" for k in range(na)]
-        inicios, acc = [], 0.0
-        for sg in segs:
-            inicios.append(acc)
-            acc += sg["d"]
-        dur_saida = acc
+        grafo.append(f"{conc}concat=n={m}:v={int(tem_v)}:a={na}{sai}")
+        return cmd_in, grafo, ("vc" if tem_v else None), [f"ac{k}" for k in range(na)], sum(sg["d"] for sg in lista)
+
+    # início de cada segmento na saída
+    inicios, acc = [], 0.0
+    for sg in segs:
+        inicios.append(acc)
+        acc += sg["d"] - (d_tr if tipo_tr == "crossfade" else 0.0)
+    dur_saida = acc + (d_tr if tipo_tr == "crossfade" else 0.0)
 
     # ---- capítulos: os do documento (deslocados) + um por arquivo emendado (capitulos=True)
     caps: list[tuple[float, str]] = []
@@ -3711,11 +3799,13 @@ def juntar_arquivos(doc: Documento, arquivos: list, posicao="fim", transicao: st
                 break
     if capitulos:
         meio = d_tr / 2 if tipo_tr == "crossfade" else 0.0
+        novos = []
         for j, (sg, ini) in enumerate(zip(segs, inicios)):
-            if j == 0 and any(abs(t) < 0.001 for t, _ in caps):
+            t = ini + (meio if j else 0.0)
+            if any(abs(t - tc) < 0.5 for tc, _ in caps):  # já há um capítulo ali (do documento): mantém o dele
                 continue
-            rot = sg["rotulo"] + (" (continuação)" if sg["doc"] and j > 0 else "")
-            caps.append((ini + (meio if j else 0.0), rot))
+            novos.append((t, sg["rotulo"] + (" (continuação)" if sg["doc"] and sg["inicio_doc"] > 0 else "")))
+        caps += novos
     caps = _limpar_capitulos(caps, dur_saida)
 
     # ---- saída
@@ -3724,53 +3814,135 @@ def juntar_arquivos(doc: Documento, arquivos: list, posicao="fim", transicao: st
     else:
         ext = entrada.suffix.lower()
         saida = doc.proxima_saida(ext if ext in _EXT_AUDIO else ".mka")
+    args_v = _args_video_edicao(saida.suffix, ref) if tem_v else []
+    if caps and saida.suffix.lower() in (".ogg", ".opus", ".oga"):
+        avisos.append(f"capítulos não gravados: o {saida.suffix} grava os tempos deles errados (use .mka/.mp3/.m4a)")
+        caps = []
+
+    def args_saida(rot_v, rot_a, meta_idx: int | None, meta_doc: int, args_video, args_audio) -> list[str]:
+        out = []
+        if rot_v:
+            out += ["-map", f"[{rot_v}]"] + args_video + _tags_faixa(ref["v"], "s:v:0")
+        for k, r in enumerate(rot_a):
+            out += ["-map", f"[{r}]"]
+            if k < len(ref["auds"]):
+                out += _tags_faixa(ref["auds"][k], f"s:a:{k}")
+        if rot_a:
+            out += args_audio
+        return out + ["-map_metadata", str(meta_doc),
+                      "-map_chapters", str(meta_idx) if meta_idx is not None else "-1"]
+
     meta = None
     if caps:
         meta = Path(tempfile.mkstemp(prefix="capitulos-", suffix=".txt", dir=doc.pasta)[1])
         meta.write_text(_texto_ffmeta(caps, dur_saida), encoding="utf-8")
-        cmd += ["-f", "ffmetadata", "-i", str(meta)]
-    cmd += ["-filter_complex", ";".join(grafo)]
-    if tem_v:
-        cmd += ["-map", f"[{rot_v}]"] + _args_video_edicao(saida.suffix, ref) + _tags_faixa(ref["v"], "s:v:0")
-    for k, r in enumerate(rot_a):
-        cmd += ["-map", f"[{r}]"]
-        if k < len(ref["auds"]):
-            cmd += _tags_faixa(ref["auds"][k], f"s:a:{k}")
-    if rot_a:
-        cmd += codec_audio(saida.suffix)
-    cmd += ["-map_metadata", "0", "-map_chapters", str(n) if meta else "-1"] + _faststart(saida) + [str(saida)]
-    if ref["legendas"] or any(f["legendas"] for f in outros):
-        avisos.append("legendas embutidas não entram na junção (a linha do tempo mudou)")
-    redim = [f["caminho"].name for f in outros if tem_v and f["v"] is not None and (f["w"], f["h"]) != (W, H)]
-    if redim:
-        avisos.append(f"redimensionado(s) para {W}x{H} com barras pretas mantendo a proporção: {', '.join(redim)}")
-    sem_som = [f["caminho"].name for f in outros if not f["auds"] and alvo_a]
-    if sem_som:
-        avisos.append(f"sem áudio (entrou com silêncio): {', '.join(sem_som)}")
-    pretos = [f["caminho"].name for f in outros if tem_v and f["v"] is None]
-    if pretos:
-        avisos.append(f"só áudio (entrou com imagem preta): {', '.join(pretos)}")
-    avisos += _avisos_profundidade(ref) if tem_v else []
-    nomes = ", ".join(f["caminho"].name for f in outros)
-    onde = ("no fim" if t_ins >= dur_doc else "no início" if t_ins <= 0 else f"em {fmt_tempo(t_ins)}")
-    desc = f"juntou {nomes} {onde}"
-    if tipo_tr != "corte":
-        desc += f" ({tipo_tr} {d_tr:.2f} s)"
-    detalhes = {"formato": (f"{W}x{H} {fps:.3f} fps {pix}" if tem_v else "só áudio"),
-                "audio": [f"{sr} Hz {lay}" for sr, lay, _ in alvo_a],
-                "trechos": [{"origem": sg["rotulo"], "inicio": fmt_tempo(ini), "duracao_s": round(sg["d"], 3)}
-                            for sg, ini in zip(segs, inicios)],
-                "duracao_esperada_s": round(dur_saida, 3)}
-    if caps:
-        detalhes["capitulos"] = [{"inicio": fmt_tempo(t), "titulo": ti} for t, ti in caps]
-    extra = {"detalhes": detalhes}
-    if avisos:
-        extra["avisos"] = avisos
+    cross = tipo_tr == "crossfade"
+    _limpar_lotes_orfaos(doc.pasta)
+    tmpdir = Path(tempfile.mkdtemp(prefix="lotes-", dir=doc.pasta)) if n > _LOTE_JUNTAR else None
+    cmds: list[list[str]] = []
+    durs: list[float] = []
     try:
-        return _rodar_versao(doc, saida, [cmd], [dur_saida], desc, progresso, extra)
+        atuais = segs
+        nivel = 0
+        # lotes: corte/fade → partes no codec de vídeo final + FLAC, juntadas com o demuxer concat (vídeo copiado);
+        # crossfade → partes intermediárias de alta qualidade, emendadas com xfade no nível de cima
+        while len(atuais) > _LOTE_JUNTAR:
+            prox = []
+            for b in range(0, len(atuais), _LOTE_JUNTAR):
+                lote = atuais[b:b + _LOTE_JUNTAR]
+                p = tmpdir / f"n{nivel}_{b // _LOTE_JUNTAR:03d}.{'mkv' if tem_v else 'mka'}"
+                ci, gr, rv, ra, dl = montar(lote, cross)
+                sem_tag = [x for k, x in enumerate(args_v) if x != "-tag:v" and (k == 0 or args_v[k - 1] != "-tag:v")]
+                av = (sem_tag if not cross else ["-c:v", "libx264", "-crf", "10", "-preset", "veryfast",
+                                                "-pix_fmt", pix]) if tem_v else []
+                c = FFMPEG + ci + ["-filter_complex", ";".join(gr)]
+                c += ["-map", f"[{rv}]"] + av if rv else []
+                for r in ra:
+                    c += ["-map", f"[{r}]"]
+                c += (["-c:a", "flac"] if ra else []) + [str(p)]
+                cmds.append(c)
+                durs.append(dl)
+                inf = {"v": ref["v"] if tem_v else None, "auds": [{"channels": ch, "channel_layout": lay,
+                                                                    "sample_rate": sr} for sr, lay, ch in alvo_a],
+                       "pre": "", "dec": [], "w": W, "h": H, "atraso_video": 0.0, "caminho": p}
+                prox.append({"info": inf, "ss": None, "t": None, "span": dl, "d": dl, "delta": 0.0,
+                             "tonemap": False, "pronto": True, "doc": False})
+            atuais = prox
+            nivel += 1
+            if not cross:
+                break
+        extra_meta = []
+        if tmpdir and not cross:
+            # junção das partes: concat demuxer, vídeo copiado, áudio codificado uma vez só
+            lista = tmpdir / "lista.txt"
+            lista.write_text("".join(f"file {esc_concat(sg['info']['caminho'])}\n" for sg in atuais))
+            final = FFMPEG + ["-f", "concat", "-safe", "0", "-i", str(lista), "-i", str(entrada)]
+            if meta:
+                final += ["-f", "ffmetadata", "-i", str(meta)]
+            final += ["-map", "0:v?"] + (["-c:v", "copy"] if tem_v else [])
+            for k in range(na):
+                final += ["-map", f"0:a:{k}"]
+                if k < len(ref["auds"]):
+                    final += _tags_faixa(ref["auds"][k], f"s:a:{k}")
+            if na:
+                final += codec_audio(saida.suffix)
+            if tem_v:
+                final += _tags_faixa(ref["v"], "s:v:0")
+            final += ["-map_metadata", "1", "-map_chapters", "2" if meta else "-1"] + _faststart(saida) + [str(saida)]
+        else:
+            ci, gr, rv, ra, dl = montar(atuais, cross)
+            m = len(atuais)
+            if meta:
+                extra_meta = ["-f", "ffmetadata", "-i", str(meta)]
+            # metadados do contêiner: os do documento (a entrada do 1º segmento dele; posicao='inicio' → não é a 0)
+            idx_doc = next((i for i, sg in enumerate(atuais) if sg.get("doc")), None)
+            if idx_doc is None:
+                extra_meta += ["-i", str(entrada)]
+                idx_doc = m + (1 if meta else 0)
+            final = FFMPEG + ci + extra_meta + ["-filter_complex", ";".join(gr)]
+            final += args_saida(rv, ra, m if meta else None, idx_doc, args_v, codec_audio(saida.suffix))
+            final += _faststart(saida) + [str(saida)]
+        cmds.append(final)
+        durs.append(dur_saida)
+
+        if ref["legendas"] or any(f["legendas"] for f in outros):
+            avisos.append("legendas embutidas não entram na junção (a linha do tempo mudou)")
+        redim = [f["caminho"].name for f in outros if tem_v and f["v"] is not None and (f["w"], f["h"]) != (W, H)]
+        if redim:
+            avisos.append(f"redimensionado(s) para {W}x{H} com barras pretas mantendo a proporção: {', '.join(redim)}")
+        sem_som = [f["caminho"].name for f in outros if not f["auds"] and alvo_a]
+        if sem_som:
+            avisos.append(f"sem áudio (entrou com silêncio): {', '.join(sem_som)}")
+        pretos = [f["caminho"].name for f in outros if tem_v and f["v"] is None]
+        if pretos:
+            avisos.append(f"só áudio (entrou com imagem preta): {', '.join(pretos)}")
+        avisos += _avisos_profundidade(ref) if tem_v else []
+        nomes = ", ".join(f["caminho"].name for f in outros)
+        onde = ("no fim" if t_ins >= dur_doc else "no início" if t_ins <= 0 else f"em {fmt_tempo(t_ins)}")
+        desc = f"juntou {nomes} {onde}"
+        if tipo_tr != "corte":
+            desc += f" ({tipo_tr} {d_tr:.2f} s)"
+        detalhes = {"formato": (f"{W}x{H} {fps:.3f} fps {pix}" if tem_v else "só áudio"),
+                    "audio": [f"{sr} Hz {lay}" for sr, lay, _ in alvo_a],
+                    "trechos": [{"origem": sg["rotulo"], "inicio": fmt_tempo(ini), "duracao_s": round(sg["d"], 3)}
+                                for sg, ini in zip(segs, inicios)],
+                    "duracao_esperada_s": round(dur_saida, 3)}
+        if len(cmds) > 1:
+            detalhes["lotes"] = len(cmds) - 1
+        if caps:
+            detalhes["capitulos"] = [{"inicio": fmt_tempo(t), "titulo": ti} for t, ti in caps]
+        extra = {"detalhes": detalhes}
+        if avisos:
+            extra["avisos"] = avisos
+        v = _rodar_versao(doc, saida, cmds, durs, desc, progresso, extra)
+        if caps and len(ler_capitulos(saida)) != len(caps):
+            v.setdefault("avisos", []).append(f"o contêiner {saida.suffix} não guardou os capítulos")
+        return v
     finally:
         if meta:
             meta.unlink(missing_ok=True)
+        if tmpdir:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 # ---- dividir
@@ -3790,6 +3962,7 @@ def dividir(doc: Documento, modo: str = "marcas", intervalo_s: float | None = No
     vids = [s for s in probe["streams"] if s.get("codec_type") == "video"
             and not s.get("disposition", {}).get("attached_pic")]
     fps = _fps_stream(vids[0]) if vids else 0.0
+    atraso = _atraso_video(probe, vids[0]) if vids else 0.0
     est = dict(estado or {})
     est.setdefault("duracao", dur)
     modo = (modo or "marcas").lower()
@@ -3798,7 +3971,7 @@ def dividir(doc: Documento, modo: str = "marcas", intervalo_s: float | None = No
     if modo == "trechos":
         if len(marcas) < 2:
             raise ValueError("modo 'trechos' precisa de pelo menos 2 marcas na régua")
-        trechos = [(_alinhar(a, fps), _alinhar(b, fps)) for a, b in zip(marcas, marcas[1:])]
+        trechos = [(_alinhar(a, fps, atraso), _alinhar(b, fps, atraso)) for a, b in zip(marcas, marcas[1:])]
     else:
         if modo == "marcas":
             if not marcas:
@@ -3821,7 +3994,7 @@ def dividir(doc: Documento, modo: str = "marcas", intervalo_s: float | None = No
             pontos = [dur * i / int(partes) for i in range(1, int(partes))]
         else:
             raise ValueError("modo: 'marcas', 'trechos', 'intervalo', 'tempos' ou 'partes'")
-        pontos = sorted({_alinhar(p, fps) for p in pontos if 0.05 < p < dur - 0.05})
+        pontos = sorted({_alinhar(p, fps, atraso) for p in pontos if 0.05 < p < dur - 0.05})
         if not pontos:
             raise ValueError("nenhum ponto de corte dentro do arquivo")
         lim = [0.0] + pontos + [dur]
@@ -3840,16 +4013,21 @@ def dividir(doc: Documento, modo: str = "marcas", intervalo_s: float | None = No
     if not rapido:
         feito = 0.0
         for (a, b), suf in zip(trechos, sufixos):
-            # tempos com 3 casas exatas, 0,4–1,4 ms antes do quadro de cada ponto: cada parte começa exatamente no
-            # quadro do ponto e termina no quadro anterior ao próximo (nenhum quadro repetido ou perdido)
-            ar = max(0.0, math.floor((a - 0.0004) * 1000) / 1000) if a > 0 else 0.0
-            br = ar + math.floor((b - 0.0004 - ar) * 1000) / 1000 if b < dur - 0.001 else ar + math.ceil((b - ar) * 1000) / 1000
+            # pontos na grade do vídeo (_alinhar) e meio ms antes no -ss: cada parte começa exatamente no quadro do
+            # ponto e termina no anterior ao próximo (_segmentos_av conta os quadros na fase do segmento). Só
+            # áudio: o próprio tempo
+            m = _MARGEM_SEEK if fps else 0.0
+            ar = max(0.0, a - m) if a > 0 else 0.0
+            br = b - m if b < dur - 0.001 else dur
             final = _reservar(_caminho(doc.original, suf, ext, destino, criar=True))
             _limpar_orfaos(final.parent)
             tmp = _temporario(final)
             ok = False
             try:
-                cmd = _cmd_preciso(entrada, probe, [(ar, br)], tmp)
+                # mesmo codec das edições: HEVC/10 bits continua HEVC/10 bits, tags de cor (HDR) mantidas
+                cmd = _cmd_preciso(entrada, probe, [(ar, br)], tmp,
+                                   _args_video_edicao(ext.lower(), {"pix_fmt": vids[0].get("pix_fmt", ""),
+                                                                    "v": vids[0]}) if vids else None)
                 comandos.append(cmd)
                 _rodar_com_progresso(cmd, b - a, progresso, feito / total, (b - a) / total)
                 final = _publicar(tmp, final)
@@ -3869,7 +4047,8 @@ def dividir(doc: Documento, modo: str = "marcas", intervalo_s: float | None = No
         pedidos = [a for a, _ in trechos[1:]]
         if vids:
             vidx = int(vids[0]["index"])
-            kfs = sorted({round(t, 6) for i, t, _tam, k in _pacotes(entrada, [(max(0.0, p - 1), 31.0) for p in pedidos])
+            kfs = sorted({round(t, 6) for i, t, _tam, k in _pacotes(entrada, [(max(0.0, p - 1), 31.0) for p in pedidos],
+                                                                     _inicio_conteiner(probe))
                           if i == vidx and k})
             reais = []
             for p in pedidos:
@@ -3882,10 +4061,12 @@ def dividir(doc: Documento, modo: str = "marcas", intervalo_s: float | None = No
             reais = pedidos
         if not reais:
             raise ValueError("nenhum keyframe perto dos pontos pedidos; use o corte preciso (rapido=False)")
+        _limpar_lotes_orfaos(pasta, ".dividir-")  # de um dividir rápido interrompido (sem escrita há 10 min)
         tmpdir = Path(tempfile.mkdtemp(prefix=".dividir-", dir=pasta))
         try:
             cortes = ",".join(f"{a:.6f}" for a in reais)
-            padrao = tmpdir / f"p%04d{ext}"
+            # o muxer segment interpreta % no caminho inteiro: o da pasta (e da extensão) vira %%
+            padrao = str(tmpdir).replace("%", "%%") + "/p%04d" + ext.replace("%", "%%")
             # o muxer segment compara com o pts de saída (deslocado pelo atraso dos B-frames/priming do áudio):
             # a tolerância faz ele aceitar exatamente o keyframe escolhido
             delta = max(0.05, 1.5 / fps) if fps else 0.0
@@ -3896,7 +4077,7 @@ def dividir(doc: Documento, modo: str = "marcas", intervalo_s: float | None = No
                 cmd += ["-segment_time_delta", f"{delta:.4f}"]
             if ext.lower() in (".mp4", ".mov", ".m4v"):
                 cmd += ["-segment_format_options", "movflags=+faststart"]
-            cmd.append(str(padrao))
+            cmd.append(padrao)
             comandos.append(cmd)
             _rodar_com_progresso(cmd, dur, progresso)
             geradas = sorted(tmpdir.glob(f"p*{ext}"))
@@ -4004,13 +4185,20 @@ def detectar_cenas(arquivo: Path | str, limiar: float = 0.3, min_intervalo_s: fl
 
 
 # ---- capítulos
+_EXT_CAP_MP4 = (".mp4", ".mov", ".m4v", ".m4a")  # contêineres em que o 1º capítulo sempre começa em 0
+
+
 def _gravar_capitulos(doc: Documento, caps: list[tuple[float, str]], descricao: str) -> dict:
     """Nova versão com estes capítulos (lista completa), sem reencodar (-c copy)."""
     entrada = doc.atual()
     probe = ffprobe(entrada)
     dur = duracao(probe)
     caps = _limpar_capitulos(caps, dur)
+    # título vazio: o MP3 (ID3 CHAP) relê como "ch1"; todos ganham o nome padrão, como no 'adicionar'
+    vazios = [i for i, (_t, ti) in enumerate(caps, 1) if not ti.strip()]
+    caps = [(t, ti.replace("\r\n", "\n") if ti.strip() else f"Capítulo {i}") for i, (t, ti) in enumerate(caps, 1)]
     saida = doc.proxima_saida()
+    mp4 = saida.suffix.lower() in _EXT_CAP_MP4
     meta = None
     try:
         base = FFMPEG + ["-i", str(entrada)]
@@ -4042,15 +4230,29 @@ def _gravar_capitulos(doc: Documento, caps: list[tuple[float, str]], descricao: 
             saida.unlink(missing_ok=True)
             raise ValueError(f"o contêiner {entrada.suffix} não guarda capítulos (gravados {len(caps)}, lidos "
                              f"{len(lidos)}); exporte para .mp4 ou .mkv antes")
+        # os tempos relidos têm de bater (Ogg/Opus grava com a base de tempo errada e o ffprobe nem reclama);
+        # no MP4/MOV/M4A o 1º capítulo sempre começa em 0
+        for i, (c, (t, _ti)) in enumerate(zip(lidos, caps)):
+            lido = float(c["inicio"])
+            if abs(lido - t) > 0.0015 and not (mp4 and i == 0 and lido < 0.0015):
+                saida.unlink(missing_ok=True)
+                raise ValueError(f"o contêiner {entrada.suffix} não guarda os tempos dos capítulos corretamente "
+                                 f"(capítulo {i + 1}: gravado {fmt_tempo(t)}, relido {fmt_tempo(lido)}); exporte "
+                                 f"para .mkv, .mka ou .mp4 antes")
     finally:
         if meta:
             meta.unlink(missing_ok=True)
     v = doc.registrar(saida, descricao, [cmd])
     v["capitulos"] = lidos
-    if caps and caps[0][0] > 0.001 and saida.suffix.lower() in (".mp4", ".mov", ".m4v"):
-        v["avisos"] = [f"no MP4/MOV o primeiro capítulo sempre começa em 0 (limitação do formato): "
-                       f"'{caps[0][1]}' aparece de 0 em diante; adicione um capítulo em 0 (ex.: 'Início') para "
-                       f"separar (o YouTube também exige o primeiro em 0:00)"]
+    avisos = []
+    if caps and caps[0][0] > 0.001 and mp4:
+        avisos.append(f"no MP4/MOV/M4A o primeiro capítulo sempre começa em 0 (limitação do formato): "
+                      f"'{caps[0][1]}' aparece de 0 em diante; adicione um capítulo em 0 (ex.: 'Início') para "
+                      f"separar (o YouTube também exige o primeiro em 0:00)")
+    if vazios:
+        avisos.append("capítulo(s) sem título ganharam o nome padrão: " + ", ".join(f"Capítulo {i}" for i in vazios))
+    if avisos:
+        v["avisos"] = avisos
     return v
 
 
@@ -4129,12 +4331,22 @@ _EFICIENCIA = {"h264": 1.0, "mpeg4": 1.4, "mpeg2video": 2.0, "hevc": 0.6, "vp9":
 _HDR_TRC = {"smpte2084": "HDR10/PQ", "arib-std-b67": "HLG"}
 
 
-def _pacotes(arq: Path, janelas: list[tuple[float, float]] | None) -> list[tuple[int, float, int, bool]]:
-    """(índice do fluxo, pts, tamanho, keyframe) de todos os pacotes (ou só das janelas [ini, dur])."""
+def _inicio_conteiner(probe: dict) -> float:
+    try:
+        return float(probe.get("format", {}).get("start_time") or 0)
+    except ValueError:
+        return 0.0
+
+
+def _pacotes(arq: Path, janelas: list[tuple[float, float]] | None,
+             inicio: float = 0.0) -> list[tuple[int, float, int, bool]]:
+    """(índice do fluxo, pts, tamanho, keyframe) de todos os pacotes (ou só das janelas [ini, dur]).
+    Tempos relativos ao início do contêiner (`inicio` = format.start_time; o ffprobe usa tempo absoluto nos
+    pacotes e no -read_intervals, e TS/MP4 com deslocamento não começam em 0)."""
     cmd = [FFPROBE, "-v", "error", "-show_entries", "packet=stream_index,pts_time,dts_time,size,flags",
            "-of", "csv=p=0"]
     if janelas:
-        cmd += ["-read_intervals", ",".join(f"{a:.3f}%+{d:.3f}" for a, d in janelas)]
+        cmd += ["-read_intervals", ",".join(f"{a + inicio:.3f}%+{d:.3f}" for a, d in janelas)]
     r = rodar(cmd + [str(arq)])
     out = []
     for linha in r.stdout.splitlines():
@@ -4143,7 +4355,7 @@ def _pacotes(arq: Path, janelas: list[tuple[float, float]] | None) -> list[tuple
             continue
         try:
             t = float(p[1]) if p[1] not in ("", "N/A") else float(p[2])
-            out.append((int(p[0]), t, int(p[3]), "K" in p[4]))
+            out.append((int(p[0]), t - inicio, int(p[3]), "K" in p[4]))
         except ValueError:
             continue
     return out
@@ -4161,12 +4373,21 @@ def relatorio_tecnico(arquivo: Path | str, faixa: int = 1) -> dict:
     VFR, entrelaçamento (idet), cor/HDR, áudio (LUFS integrado, pico verdadeiro, clipping), indícios de
     recompressão (heurísticos) e recomendações. Em arquivos longos, mede por amostragem (janelas espalhadas)."""
     arq = Path(arquivo)
-    probe = ffprobe(arq)
+    if not arq.is_file():
+        raise FileNotFoundError(f"arquivo não encontrado: {arq}")
+    try:
+        probe = ffprobe(arq)
+    except ErroFFmpeg as e:
+        motivo = str(e).strip().splitlines()[-1] if str(e).strip() else ""
+        raise ValueError(f"{arq.name} não pôde ser lido: arquivo corrompido, incompleto (download/gravação "
+                         f"interrompidos?) ou não é mídia ({motivo})") from None
     fmt = probe.get("format", {})
     dur = duracao(probe)
     vids = [s for s in probe["streams"] if s.get("codec_type") == "video"
             and not s.get("disposition", {}).get("attached_pic")]
     auds = faixas_audio(probe)
+    if not vids and not auds:
+        raise ValueError(f"{arq.name} não tem vídeo nem áudio legíveis (corrompido ou não é mídia)")
     rel: dict = {"arquivo": str(arq), "duracao": fmt_tempo(dur), "duracao_s": round(dur, 3),
                  "tamanho_mb": round(arq.stat().st_size / _MB, 2),
                  "conteiner": fmt.get("format_long_name") or fmt.get("format_name"),
@@ -4179,7 +4400,7 @@ def relatorio_tecnico(arquivo: Path | str, faixa: int = 1) -> dict:
     if amostrado:
         nj = 8
         janelas = [(max(0.0, dur * (i + 0.5) / nj - 10), 20.0) for i in range(nj)]
-    pac = _pacotes(arq, janelas)
+    pac = _pacotes(arq, janelas, _inicio_conteiner(probe))
     tempo_amostra = sum(min(d, dur - a) for a, d in janelas) if janelas else dur
     por_fluxo: dict[int, list] = {}
     for idx, t, tam, k in pac:
@@ -4357,9 +4578,10 @@ def relatorio_tecnico(arquivo: Path | str, faixa: int = 1) -> dict:
         def achar(rx, txt):
             m = re.findall(rx, txt)
             try:
-                return float(m[-1]) if m else None
+                x = float(m[-1]) if m else None
             except ValueError:
                 return None
+            return x if x is not None and math.isfinite(x) else None  # -inf (silêncio) → None: JSON válido
         ana = {"faixa": k + 1, "lufs_integrado": achar(r"I:\s*(-?[\d.]+) LUFS", resumo),
                "lra_lu": achar(r"LRA:\s*(-?[\d.]+) LU", resumo),
                "pico_verdadeiro_dbtp": achar(r"Peak:\s*(-?[\d.]+|-inf) dBFS", resumo),

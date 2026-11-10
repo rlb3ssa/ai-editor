@@ -296,7 +296,8 @@ Só com o ffmpeg. Código em `core.py`, seção "montagem (Fase 5)"; ferramentas
 `detectar_cenas`, `capitulos`, `relatorio_tecnico`. Filtros registrados em `binarios.RECURSOS_FFMPEG` (`xfade`,
 `acrossfade`, `idet`, `blockdetect`, `ebur128`).
 - [x] Juntar outro arquivo → `juntar_arquivos` (versão). Formato de saída = o do documento: cada segmento é uma entrada
-  própria (o documento, se a inserção for no meio, vira duas: `-t` e `-ss` 0,4 ms antes do quadro) com
+  própria (o documento, se a inserção for no meio, vira duas: `-t` com folga e `-ss` meio ms antes do quadro, ponto na
+  grade do vídeo `atraso + k/fps`) com
   `scale…force_original_aspect_ratio=decrease` + `pad` (barras pretas), SAR do `_midia` (anamórfico) → `setsar=1`,
   `fps=taxa:start_time=0`, `format`, `tpad` clone + `trim=end=D` (D em quadros inteiros); áudio `aresample=first_pts=0`
   + `aformat` (taxa/layout padrão do nº de canais; `_filtro_layout` renomeia 5.1(side)/"unknown"; mono → estéreo com
@@ -317,8 +318,8 @@ Só com o ffmpeg. Código em `core.py`, seção "montagem (Fase 5)"; ferramentas
   (±7 ms, menos de 1 quadro) nos 4 eventos. Memória: 5 entradas 720p ≈ 385 MB; crossfade com doc de 60 s ≈ 395 MB.
 - [x] Dividir em partes → `dividir` (ARQUIVOS NOVOS `nome.parte01.ext`, com `_reservar`/`_temporario`/`_publicar` da
   exportação; pasta `destino`). Modos `marcas` (0→m1→…→fim), `trechos` (só m1→m2, m2→m3…), `intervalo`, `tempos`,
-  `partes`. Preciso: `_cmd_preciso` por parte com tempos de 3 casas exatas 0,4–1,4 ms antes do quadro de cada ponto
-  (cada parte começa no quadro do ponto e acaba no anterior ao próximo). `rapido=True`: muxer `segment` com `-c copy`;
+  `partes`. Preciso: `_cmd_preciso` por parte, pontos na grade do vídeo (`_alinhar` com o atraso do vídeo) e `-ss` meio
+  ms antes (só áudio: o próprio tempo); codec das edições (`_args_video_edicao`: HEVC/10 bits continua HEVC/10 bits). `rapido=True`: muxer `segment` com `-c copy`;
   escolhe antes o 1º keyframe ≥ ponto (`ffprobe -read_intervals` só perto dos pontos) e passa `segment_time_delta`
   de 1,5 quadro (o muxer compara com o pts de saída, deslocado pelo atraso dos B-frames/priming; sem isso pulava o
   keyframe certo). Testes (cenas.mp4 12 s, 360 quadros): intervalo 5 s → 150+150+60 quadros; tempos 3/6,5/8 →
@@ -349,9 +350,11 @@ Só com o ffmpeg. Código em `core.py`, seção "montagem (Fase 5)"; ferramentas
   seno clipado → clipping, 1,2 LUFS, +0,1 dBTP; −21,7 LUFS → "normalizar". Tempo: 20 s ≈ 4–7 s; 12 min ≈ 10 s.
 - Limitações: juntar recodifica tudo (mesmo quando os arquivos já são iguais; não há caminho `-c copy`), descarta
   legendas, e só usa a faixa k de cada arquivo para a faixa k do documento (falta = silêncio); VFR vira CFR na taxa do
-  documento; não converte HDR↔SDR entre arquivos (o formato de cor segue o do documento, sem tonemap); a
+  documento; HDR → SDR por `zscale`+`tonemap` (hable) só quando o documento é SDR; SDR num documento HDR só avisa; a
   junção não reaproveita `_segmentos_av` (precisa normalizar cada entrada; o mesmo princípio — sem PTS-STARTPTS,
-  fim por trim/atrim, nº exato de quadros — está implementado por segmento). `dividir` preciso recodifica cada parte
+  fim por trim/atrim, nº exato de quadros, fase de quadro — está implementado por segmento); vídeo fora da grade é
+  adiantado até 1 quadro (< 34 ms a 29,97) em relação ao áudio do mesmo segmento quando o corte é no início do
+  documento (o áudio antes do 1º quadro é cortado junto); velocidade/congelar ainda usam a grade por arredondamento. `dividir` preciso recodifica cada parte
   e descarta capítulos/legendas (como `_cmd_preciso`); o rápido corta nos keyframes (pode sair menos partes se não
   houver keyframe entre dois pontos). `detectar_cenas` quase não pega fades/dissolves e decodifica o vídeo inteiro
   (1 h de 720p ≈ 6 min). No MP4/MOV o primeiro capítulo sempre começa em 0 (limitação do formato; avisa). WAV não
@@ -359,6 +362,41 @@ Só com o ffmpeg. Código em `core.py`, seção "montagem (Fase 5)"; ferramentas
   `blockdetect` depende muito do conteúdo — em padrões sintéticos dá 15–19 mesmo com boa qualidade); `idet` dá falso
   positivo em gráficos com linhas finas, por isso "possível" quando o arquivo se diz progressivo; LUFS de arquivos
   longos é estimado por amostragem.
+- [x] Revisão da Fase 5 (commit 94f7c31):
+  - **Quadro fora da grade** (MKV com vídeo em 0,021 s; corte entre dois quadros): com `-ss a` o 1º quadro tem pts =
+    fração φ de quadro e o `fps` (round=near) o punha no slot 1 → cada corte perdia um quadro e repetia outro.
+    `_segmentos_av(atraso=...)` (corte preciso, exportar com trechos e os trechos de velocidade 1 da linha do tempo) adianta o vídeo em φ e conta
+    os limites na fase do segmento (`ceil(t·fps − φ)` = quadros que começam antes de t; limite entre segmentos na
+    fase do seguinte → soma telescópica, sem acumular). `juntar_arquivos`: o mesmo por segmento (vídeo adiantado em
+    φ/fps e áudio cortado junto com `atrim=start`; D = nº de quadros de (span − φ), não a duração do contêiner).
+    num.mkv (300 quadros, vídeo em 0,021 s): dividir em 3,003 → [0..88] + [89..299]; tempos 3,024/6,5 → 90+104+106;
+    intervalo 2,5 → 74+75+75+76; partes=3 → 100×3; nenhum quadro faltando/duplicado (antes: [0,0,1..88] e
+    [90,90..299]). num2997.mp4 continua exato (90+210; 75×4; 100×3). Juntar num.mkv + num2997.mp4 em 3,003 →
+    [0..88] [0..299] [89..299], 600 quadros (antes 601: [0,0..88]…[90,90..]); num.mkv no fim de num.mkv → 300+300.
+    Testes da Fase 3 (`q.py`/`q2.py`) iguais: 480 quadros/16,016 s e 16,000 s; [245,268,100,123,300,323], 72/73 quadros.
+    `manter_trechos` 1–2 s + 5–6,5 s em num.mkv → quadros 30..59 + 150..194 (75, sem duplicado).
+  - Sincronia (med.py): fim com mk2997/ts25/atraso/vfr → flashes e bipes iguais (≤ 0,6 ms); meio MP4 e meio MKV
+    ±1 ms; fade e crossfade exatos.
+  - `dividir rapido` e as janelas do relatório: `_pacotes(..., inicio=format.start_time)` (o ffprobe usa tempo
+    absoluto nos pacotes e no `-read_intervals`). TS com início 1,445 s e MP4 com 9,978 s: keyframes 0,021/1,521…
+    → partes de 4,521 + 3,000 + resto (pedidos 3,3/7,2 → reais 4,521/7,521). TS de 11 min com deslocamento de 100 s:
+    79 keyframes nas 8 janelas de 20 s (GOP 2 s).
+  - HDR + SDR no `juntar_arquivos`: doc SDR + clipe HDR10 → `zscale`+`tonemap=hable` (aviso; luma 118 contra PQ cru);
+    doc HDR + clipe SDR → aviso.
+  - Capítulos: os tempos relidos têm de bater (±1,5 ms; MP4/MOV/M4V/M4A aceitam o 1º em 0), senão erro e o contêiner é
+    recusado: Opus gravava 0,5 s como 1,5 s → recusado; OGG/FLAC não guardam → erro. Título vazio vira "Capítulo N"
+    (o MP3 relia "ch1"), com aviso; `\r\n` → `\n`. Aviso do 1º capítulo em 0 também no .m4a. Juntar em .ogg/.opus não
+    grava capítulos (aviso) e avisa se o contêiner não os guardou.
+  - `capitulos=True` não cria capítulo onde o documento já tem um (a < 0,5 s) e "(continuação)" só quando o trecho do
+    documento não começa em 0; `posicao='inicio'` copia os metadados (título) do documento, não do arquivo emendado.
+  - Muitas entradas: lotes de `_LOTE_JUNTAR` = 6. Corte/fade: partes .mkv já no codec de vídeo final + FLAC, juntadas
+    pelo demuxer concat (vídeo copiado, áudio codificado uma vez). Crossfade: partes intermediárias x264 CRF 10 + FLAC
+    com os crossfades internos, emendadas com `xfade` no nível de cima (recursivo). Doc + 8 arquivos (9 segmentos,
+    2 lotes): corte/fade 54,000 s, 1620 quadros, 27 flashes = bipes; crossfade 46,000 s, 1380 quadros; pico de RSS
+    172/183/439 MB.
+  - Relatório: −inf → None (JSON válido; silencio.mp4); arquivo corrompido/sem moov → mensagem amigável.
+  - Pastas `.dividir-*` órfãs (> 10 min sem escrita) são apagadas; `%` no caminho da pasta vira `%%` no padrão do
+    muxer segment (testado em `pct 100%d %s/`).
 
 ### Fase 6 — Legendas e fala (IA local)
 Módulo `src/ai_editor/fala.py` (sem Qt); ferramentas MCP na seção "fala (Fase 6)" do `mcp_server.py`.
