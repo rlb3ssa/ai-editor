@@ -38,6 +38,7 @@ COR_TRILHA = QColor("#1f232b")
 COR_ONDA = QColor("#4fa3ff")
 COR_ONDA_MUDA = QColor("#4a4f5a")
 COR_CABECA = QColor("#ff4757")
+COR_CAPITULO = QColor("#e6edf3")  # capítulos: claro e discreto (as marcas usam as cores de CORES_TRECHOS)
 # cores dos trechos entre marcas consecutivas (1→2, 2→3, ...), em ciclo
 CORES_TRECHOS = ["#ffc400", "#22d3ee", "#f472b6", "#4ade80", "#fb923c", "#a78bfa"]
 NOMES_CORES = ["amarelo", "ciano", "rosa", "verde", "laranja", "violeta"]
@@ -238,6 +239,16 @@ class Regua(AreaTempo):
         super().__init__(janela)
         self.setFixedHeight(42)
 
+    def mouseMoveEvent(self, e):
+        super().mouseMoveEvent(e)
+        # perto de um capítulo (6 px): o tooltip mostra o título
+        x, w = e.position().x(), self.width()
+        perto = [(abs(self.v.t_para_x(c["tempo"], w) - x), i, c) for i, c in enumerate(self.j.capitulos)]
+        perto = [q for q in perto if q[0] <= 6]
+        if perto:
+            _, i, c = min(perto, key=lambda q: q[0])
+            self.setToolTip(f"Capítulo {i + 1}: {c['titulo'] or '(sem título)'} — {fmt_tempo(c['tempo'])}")
+
     def paintEvent(self, _):
         p = QPainter(self)
         w, h = self.width(), self.height()
@@ -262,6 +273,16 @@ class Regua(AreaTempo):
             p.drawText(QPointF(x + 3, 12), _rotulo(t, passo, self.v.dur))
             t += passo
         self.sobreposicao(p)
+        # capítulos do arquivo: linha pontilhada discreta + losango no topo (título no tooltip)
+        for c in self.j.capitulos:
+            x = self.v.t_para_x(c["tempo"], w)
+            if -6 <= x <= w + 6:
+                p.setPen(QPen(COR_CAPITULO, 1, Qt.DotLine))
+                p.drawLine(QPointF(x, 6), QPointF(x, h - 10))
+                p.setPen(Qt.NoPen)
+                p.setBrush(COR_CAPITULO)
+                p.drawPolygon(QPolygonF([QPointF(x, 0), QPointF(x + 4, 4), QPointF(x, 8), QPointF(x - 4, 4)]))
+                p.setBrush(Qt.NoBrush)
         # alça da cabeça de leitura
         p.setBrush(COR_CABECA)
         p.setPen(Qt.NoPen)
@@ -591,6 +612,8 @@ class Janela(QMainWindow):
         self.arquivo: Path | None = None
         self.pos = 0.0
         self.marcas: list[float] = []  # pontos marcados (s), sempre em ordem
+        self.capitulos: list[dict] = []  # capítulos do arquivo tocando (mpv chapter-list): {"tempo", "titulo"}
+        self._chave_caps = None
         self.linhas: list[LinhaFaixa] = []
         self.faixas_mpv: list[dict] = []
         self._start_pendente = False
@@ -1138,6 +1161,10 @@ class Janela(QMainWindow):
         dur = float(self._get("duration", 0) or 0)
         if dur and abs(dur - self.visao.dur) > 0.0005:
             self.visao.definir_duracao(dur)
+        if dur and self._chave_caps != (str(self.arquivo), dur):  # arquivo novo carregado: relê os capítulos
+            self._chave_caps = (str(self.arquivo), dur)
+            self.capitulos = [{"tempo": float(c.get("time") or 0), "titulo": c.get("title") or ""}
+                              for c in (self._get("chapter-list", []) or [])]
         if self._start_pendente and self._get("time-pos") is not None:
             self._start_pendente = False
             self._set("start", "none")
@@ -1188,6 +1215,8 @@ class Janela(QMainWindow):
             "pausado": bool(self._get("pause", True)), "velocidade": self._get("speed", 1.0),
             "fps": self.fps, "quadro": int(round(self.pos * self.fps)) if self.fps else None,
             **self.info_marcas(),
+            "capitulos": [{"n": i + 1, "tempo": round(c["tempo"], 3), "tempo_fmt": fmt_tempo(c["tempo"]),
+                           "titulo": c["titulo"]} for i, c in enumerate(self.capitulos)],
             "visao": [fmt_tempo(self.visao.ini), fmt_tempo(self.visao.fim)],
             "faixas_audio": faixas,
         }

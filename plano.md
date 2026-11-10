@@ -69,6 +69,18 @@ com o que foi medido):
   musica_inicio, ducking, ducking_db, titulo)`.
 - Extrair só o áudio: `exportar` com predefinição `mp3`/`m4a`/`opus`/`ogg`/`wav`/`flac` (ou `faixa_audio(acao='extrair')`).
 
+Montagem e análise (Fase 5; `core.py` seção "montagem"):
+- `juntar_arquivos(arquivos, posicao=fim|inicio|tempo, transicao=corte|fade|crossfade, duracao_transicao, so_audio=erro|preto,
+  capitulos)`: versão; normaliza tudo para o formato do vídeo aberto.
+- `dividir(modo=marcas|trechos|intervalo|tempos|partes, intervalo_s, tempos, partes, destino, rapido)`: ARQUIVOS NOVOS
+  `nome.parte01.ext`... (como exportar; não cria versão, nunca sobrescreve).
+- `detectar_cenas(limiar, min_intervalo_s, inicio, fim, marcar)`: tempos dos cortes de cena com score; `marcar=True` põe
+  marcas na régua.
+- `capitulos(acao=listar|adicionar|remover|renomear|limpar|definir, tempo, titulo, numero, itens)`: gravar = versão sem
+  reencodar. A janela mostra os capítulos na régua e o `estado` traz o campo `capitulos`.
+- `relatorio_tecnico(arquivo, faixa)`: bitrate, GOP, VFR, entrelaçamento, cor/HDR, LUFS/pico/clipping, indícios de
+  recompressão e recomendações.
+
 ### 2.3 Regras de versões
 - Cada edição grava `vNNN.ext` em `.<arquivo>.versoes/` ao lado do original, com `historico.json`.
 - **Salvar**: a última versão vira o original; o original vai para a Lixeira e as versões são apagadas.
@@ -255,11 +267,73 @@ de 50 ms do `astats` (`niveis_audio`, p10 = piso; fala = p80 das janelas acima d
     (e duracao_min_s/2) e mostra o limiar usado. MCP: `inicio`/`fim`/`musica_inicio` aceitam número (`str | float`).
 
 ### Fase 5 — Montagem e análise
-- [ ] Juntar outro arquivo (emendar vídeos diferentes, normalizando resolução/fps/áudio).
-- [ ] Dividir em partes (por marcas ou a cada N minutos).
-- [ ] Detectar cortes de cena (sugestões de pontos de corte).
-- [ ] Capítulos: mostrar na régua, criar e editar.
-- [ ] Relatório técnico: bitrate, qualidade, sinais de recompressão.
+Só com o ffmpeg. Código em `core.py`, seção "montagem (Fase 5)"; ferramentas MCP `juntar_arquivos`, `dividir`,
+`detectar_cenas`, `capitulos`, `relatorio_tecnico`. Filtros registrados em `binarios.RECURSOS_FFMPEG` (`xfade`,
+`acrossfade`, `idet`, `blockdetect`, `ebur128`).
+- [x] Juntar outro arquivo → `juntar_arquivos` (versão). Formato de saída = o do documento: cada segmento é uma entrada
+  própria (o documento, se a inserção for no meio, vira duas: `-t` e `-ss` 0,4 ms antes do quadro) com
+  `scale…force_original_aspect_ratio=decrease` + `pad` (barras pretas), SAR do `_midia` (anamórfico) → `setsar=1`,
+  `fps=taxa:start_time=0`, `format`, `tpad` clone + `trim=end=D` (D em quadros inteiros); áudio `aresample=first_pts=0`
+  + `aformat` (taxa/layout padrão do nº de canais; `_filtro_layout` renomeia 5.1(side)/"unknown"; mono → estéreo com
+  `pan`, sem os −3 dB do upmix) + `apad,atrim=end=D` → áudio e vídeo de cada segmento com o mesmo tamanho exato, sem
+  `PTS-STARTPTS` por faixa. Sem áudio → `anullsrc`; só áudio num vídeo → erro claro ou `so_audio='preto'` (`color`);
+  documento só áudio → junta só o som (.wav/.mp3… mantém, senão .mka). `fade` = fade a preto/afade de d/2 nos dois
+  lados de cada emenda (duração igual); `crossfade` = cadeia de `xfade`/`acrossfade` (offset = soma das durações −
+  k·d). Capítulos do documento são remapeados; `capitulos=True` cria um por arquivo ("(continuação)" quando o
+  documento volta). Até 2 threads por decodificador.
+  Testes (video_720p 1280x720 30 fps 48 kHz mono + outro_formato 640x480 25 fps + vertical 1080x1920 + sem áudio
+  854x480 24 fps + anamórfico 720x576 SAR 64:45 44,1 kHz estéreo): **43,000 s** = 20+6+8+4+5, 1290 quadros,
+  1280x720 SAR 1:1 30 fps, áudio 43,000 s 48 kHz mono; volume por trecho −21,0/−21,1/−21,1/**−91 (silêncio)**/−21,1 dB;
+  quadros conferidos (pillarbox no 4:3 e no vertical, anamórfico em 16:9). No meio (10 s) com capítulos: 26,000 s,
+  780 quadros, 2 capítulos. `fade` no início: luma 123 → **16** no ponto de emenda → 125, áudio sobe do silêncio.
+  `crossfade` 1 s com 3 arquivos: 29,000 s (= 20+6+5−2), quadros do meio da transição misturados. Doc 5.1(side) AAC
+  ("unknown") + mono/sem áudio/estéreo: 31,56 s 5.1, mono foi para o canal central. Sincronia (flash+bipe em MP4
+  25 fps/44,1 kHz e MKV 23,976 fps/Opus, inserção no meio de um MKV): diferença áudio−vídeo igual à da origem
+  (±7 ms, menos de 1 quadro) nos 4 eventos. Memória: 5 entradas 720p ≈ 385 MB; crossfade com doc de 60 s ≈ 395 MB.
+- [x] Dividir em partes → `dividir` (ARQUIVOS NOVOS `nome.parte01.ext`, com `_reservar`/`_temporario`/`_publicar` da
+  exportação; pasta `destino`). Modos `marcas` (0→m1→…→fim), `trechos` (só m1→m2, m2→m3…), `intervalo`, `tempos`,
+  `partes`. Preciso: `_cmd_preciso` por parte com tempos de 3 casas exatas 0,4–1,4 ms antes do quadro de cada ponto
+  (cada parte começa no quadro do ponto e acaba no anterior ao próximo). `rapido=True`: muxer `segment` com `-c copy`;
+  escolhe antes o 1º keyframe ≥ ponto (`ffprobe -read_intervals` só perto dos pontos) e passa `segment_time_delta`
+  de 1,5 quadro (o muxer compara com o pts de saída, deslocado pelo atraso dos B-frames/priming; sem isso pulava o
+  keyframe certo). Testes (cenas.mp4 12 s, 360 quadros): intervalo 5 s → 150+150+60 quadros; tempos 3/6,5/8 →
+  90+105+45+120; partes=3 → 120×3; marcas 3/6 → 90+90+180; trechos → 90+60; rápido intervalo 4 → keyframes reais
+  5 e 8 s (150+90+120); soma das durações 12,001–12,021 s. Rodar de novo no mesmo destino → `parte01.2.mp4`.
+- [x] Detectar cortes de cena → `detectar_cenas`: `select=gt(scene,x)` + `metadata=print:file=` numa cópia a 320 px,
+  `-threads 4`, `-skip_loop_filter all` (~15% mais rápido), janela `inicio/fim` com `-t` na ENTRADA (na saída o
+  filtro via quadros depois do fim). Cortes a menos de `min_intervalo_s` → fica o de maior score. `marcar=True` → comando
+  `marcar` da janela. Testes: cortes nítidos em 3/6/8/10 s → **3,0 (0,92), 6,0 (0,52), 8,0 (0,40), 10,0 (0,85)**;
+  min_intervalo 2,5 → 3/6/10; vídeo da junção → 20/26/34/38 (exatamente as emendas); sem cortes → lista vazia + dica.
+  Velocidade: 720p ≈ 10× o tempo real (2 min em 12 s).
+- [x] Capítulos → `capitulos` (listar/adicionar/remover/renomear/limpar/definir): lê do `ffprobe -show_chapters`; grava
+  FFMETADATA (TIMEBASE 1/1000; fim = início do próximo) com `-map_chapters 1 -c copy` (versão sem reencodar). Escape
+  de `= ; # \` e quebra de linha com barra invertida. A trilha de texto de capítulos do MP4 aparece como fluxo `data`
+  (`bin_data`/`text`) e é excluída (`-map -0:i`) para não duplicar. Se o contêiner não guardar (WAV), erro claro (confere
+  relendo). Janela: losango claro no topo da régua + linha pontilhada (cor diferente das marcas), título no tooltip;
+  lidos da propriedade `chapter-list` do mpv quando muda o arquivo; `estado.capitulos`. Testes: título
+  `Título = "x"; #1 \ barra⏎segunda linha ç` gravado e lido idêntico em MP4, MKV, WebM e MP3; renomear/remover/limpar
+  ok; 3 regravações no MP4 sem acumular fluxos; janela mostrou 4 capítulos (captura) e `estado.capitulos` com títulos.
+- [x] Relatório técnico → `relatorio_tecnico`: pacotes via `ffprobe -show_entries packet` (tudo até 10 min; acima,
+  8 janelas de 20 s com `-read_intervals`) → bitrate por faixa e pico em 1 s, GOP (intervalo médio/máx. de
+  keyframes), VFR (> 2% dos intervalos fora de ±20% da mediana); `idet` + `blockdetect` em 3×60 quadros
+  (`-noaccurate_seek`); loudness `ebur128=peak=true` + `astats` (clipping = pico ≥ −0,1 dBFS com fator plano > 0 ou
+  ≥ 10 picos); acima de 5 min, 10 janelas de 30 s concatenadas (estimativa). Recompressão = bits/pixel ajustado pelo
+  codec (H.264 1; HEVC 0,6; VP9 0,65; AV1 0,5): < 0,035 "muito baixo", < 0,06 "baixo"; blocagem só reforça.
+  Testes: 720p 2,8 Mbps → 0,10 bit/px sem indícios; recodificado a 150 kbps → 0,006 bit/px + blocagem (indício);
+  entrelaçado TFF sinalizado → "desentrelaçar" (não ok para YouTube); VFR detectado; HDR10/PQ 10 bits detectado;
+  seno clipado → clipping, 1,2 LUFS, +0,1 dBTP; −21,7 LUFS → "normalizar". Tempo: 20 s ≈ 4–7 s; 12 min ≈ 10 s.
+- Limitações: juntar recodifica tudo (mesmo quando os arquivos já são iguais; não há caminho `-c copy`), descarta
+  legendas, e só usa a faixa k de cada arquivo para a faixa k do documento (falta = silêncio); VFR vira CFR na taxa do
+  documento; não converte HDR↔SDR entre arquivos (o formato de cor segue o do documento, sem tonemap); a
+  junção não reaproveita `_segmentos_av` (precisa normalizar cada entrada; o mesmo princípio — sem PTS-STARTPTS,
+  fim por trim/atrim, nº exato de quadros — está implementado por segmento). `dividir` preciso recodifica cada parte
+  e descarta capítulos/legendas (como `_cmd_preciso`); o rápido corta nos keyframes (pode sair menos partes se não
+  houver keyframe entre dois pontos). `detectar_cenas` quase não pega fades/dissolves e decodifica o vídeo inteiro
+  (1 h de 720p ≈ 6 min). No MP4/MOV o primeiro capítulo sempre começa em 0 (limitação do formato; avisa). WAV não
+  guarda capítulos. Relatório: indícios de recompressão e blocagem são heurísticos (conteúdo simples comprime muito; o
+  `blockdetect` depende muito do conteúdo — em padrões sintéticos dá 15–19 mesmo com boa qualidade); `idet` dá falso
+  positivo em gráficos com linhas finas, por isso "possível" quando o arquivo se diz progressivo; LUFS de arquivos
+  longos é estimado por amostragem.
 
 ### Fase 6 — Legendas e fala (IA local)
 - [ ] Transcrição local com Whisper (whisper.cpp sob demanda, ou o filtro `whisper` do ffmpeg 8).

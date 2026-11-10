@@ -108,6 +108,12 @@ cancelar/fechar/estado, `predefinicao`, `trecho`=índice no combo, `limite_mb`, 
   `afade`/`atrim start=`/`enable` usam pts. `afftdn` atrasa 25 ms e `anlmdn` 8 ms sem mudar o nº de amostras
   (`latencia_filtro`: `apad` + `atrim`). `alimiter` tem `level=1` por padrão (normaliza para 0 dB): use `level=0`.
   `-ss` junto com `-stream_loop` corrompe os timestamps: entradas separadas + `concat` + `asetpts=N/SR/TB`.
+- Montagem (Fase 5, `core.py` seção "montagem"): capítulos via FFMETADATA (`_esc_ffmeta`; `-f ffmetadata -i` +
+  `-map_chapters N -c copy`). No MP4 a trilha de capítulos aparece como fluxo `data` `bin_data`/tag `text`: exclua-a
+  (`-map -0:i`) ao regravar, senão duplica; o 1º capítulo do MP4 sempre começa em 0. Muxer `segment` (`-c copy`)
+  compara com o pts de SAÍDA (deslocado por B-frames/priming): passe os keyframes exatos + `-segment_time_delta`.
+  `select=gt(scene,x)` com `-t` na saída ainda processa quadros depois do fim: ponha `-t` antes do `-i`. Na janela,
+  capítulos vêm de `chapter-list` do mpv (relidos quando muda arquivo/duração em `_tick`).
 
 ## Git
 - Trabalhe na branch **`dev`**. Commits pequenos, mensagem em português no imperativo

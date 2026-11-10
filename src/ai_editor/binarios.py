@@ -96,6 +96,11 @@ RECURSOS_FFMPEG = [
     ("filters", "vidstabtransform", False, "estabilizar em 2 passes (vid.stab)"),
     ("filters", "deshake", False, "estabilizar (alternativa simples ao vid.stab)"),
     ("filters", "colortemperature", False, "temperatura de cor (ajustar_cor; sem ele usa colorbalance)"),
+    ("filters", "xfade", False, "juntar_arquivos com transicao='crossfade' (ffmpeg 4.3+)"),
+    ("filters", "acrossfade", False, "juntar_arquivos com transicao='crossfade'"),
+    ("filters", "idet", False, "relatorio_tecnico: detectar entrelaçamento"),
+    ("filters", "blockdetect", False, "relatorio_tecnico: blocagem estimada (ffmpeg 5.1+)"),
+    ("filters", "ebur128", False, "loudness (LUFS) e pico verdadeiro"),
 ]
 
 

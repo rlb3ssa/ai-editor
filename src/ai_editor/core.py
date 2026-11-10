@@ -3567,8 +3567,9 @@ def juntar_arquivos(doc: Documento, arquivos: list, posicao="fim", transicao: st
     W, H = (max(2, ref["w"] // 2 * 2), max(2, ref["h"] // 2 * 2)) if tem_v else (0, 0)
     pix = "yuv420p10le" if tem_v and _10bits(ref["pix_fmt"]) and not entrada.suffix.lower() == ".webm" else "yuv420p"
     alvo_a: list[tuple[int, str, int]] = []  # (taxa, layout, canais) de cada faixa de saída
-    for s in ref["auds"]:
-        alvo_a.append((int(s.get("sample_rate") or 48000), _layout(s), int(s.get("channels") or 2)))
+    for s in ref["auds"]:  # layout padrão do nº de canais (AAC 6 canais "unknown"/5.1(side) → 5.1; ver _filtro_layout)
+        ch = int(s.get("channels") or 2)
+        alvo_a.append((int(s.get("sample_rate") or 48000), _LAYOUT_PADRAO.get(ch) or _layout(s), ch))
     if not alvo_a:
         com_audio = [s for f in outros for s in f["auds"][:1]]
         if com_audio:
@@ -3664,7 +3665,9 @@ def juntar_arquivos(doc: Documento, arquivos: list, posicao="fim", transicao: st
             if k < len(inf["auds"]):
                 s = inf["auds"][k]
                 mono_estereo = int(s.get("channels") or 0) == 1 and ch == 2
-                pre_a = "pan=stereo|c0=c0|c1=c0," if mono_estereo else ""
+                # mono → estéreo: o mesmo sinal nos dois lados (o aformat sozinho poria -3 dB); senão só renomeia
+                # os canais para o layout padrão (channelmap, sem mixagem) antes do aformat
+                pre_a = "pan=stereo|c0=c0|c1=c0," if mono_estereo else _filtro_layout(s)
                 grafo.append(f"[{i}:a:{k}]{pre_a}aresample={sr}:first_pts=0,"
                              f"aformat=sample_fmts=fltp:sample_rates={sr}:channel_layouts={lay},"
                              f"apad,atrim=end={D:.6f},asetpts=PTS-STARTPTS{fades_a}[a{k}_{i}]")
@@ -4255,12 +4258,14 @@ def relatorio_tecnico(arquivo: Path | str, faixa: int = 1) -> dict:
         pos = [dur * f for f in (0.2, 0.5, 0.8)] if dur > 6 else [0.0]
         tff = bff = prog = 0
         blocos = []
-        for t in pos:
+        disp = binarios._lista_ffmpeg("filters")
+        filtros_amostra = ",".join(f for f in ("idet", "blockdetect") if not disp or f in disp)
+        for t in (pos if filtros_amostra else []):
             # -noaccurate_seek: analisa a partir do keyframe anterior (não decodifica quadros só para chegar em t)
             err = _ffmpeg_stderr([FFMPEG[0], "-hide_banner", "-nostdin", "-threads", "4", "-noaccurate_seek",
                                   "-ss", f"{t:.3f}"]
                                  + _dec_entrada(v) + ["-i", str(arq), "-map", "0:V:0", "-frames:v", "60",
-                                 "-vf", "idet,blockdetect", "-an", "-sn", "-f", "null", "-"], timeout=120)
+                                 "-vf", filtros_amostra, "-an", "-sn", "-f", "null", "-"], timeout=120)
             m = re.findall(r"Multi frame detection:\s*TFF:\s*(\d+)\s*BFF:\s*(\d+)\s*Progressive:\s*(\d+)", err)
             if m:
                 a1, b1, c1 = max(m, key=lambda x: sum(map(int, x)))

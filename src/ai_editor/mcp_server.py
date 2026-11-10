@@ -1069,6 +1069,192 @@ async def buscar_fala(texto: str, idioma: str = "auto", modelo: str = "base", fa
     return r
 
 
+# ---------------------------------------------------------------- objetos (Fase 7: IA local, sob demanda)
+# Segmentar/rastrear (SAM 2.1), remover (LaMa / plano de fundo), fundo e recorte com alfa. Código em `objetos.py`.
+# Operações longas viram TAREFAS: a ferramenta espera até _ESPERA_TAREFA_S; se não terminar, devolve o id e o
+# Claude acompanha com `tarefas`. O progresso aparece na barra de status da janela.
+_ESPERA_TAREFA_S = 50
+
+
+def _objetos():
+    from . import objetos
+    return objetos
+
+
+def _resposta_tarefa(t) -> list | dict:
+    if t.estado == "concluida":
+        r = t.resultado
+        if isinstance(r, dict) and r.get("previas"):
+            saida: list = [json.dumps({k: v for k, v in r.items() if k != "previas"}, ensure_ascii=False)]
+            for p in r["previas"]:
+                saida.append(f"conferência em {p['tempo']} (objeto pintado de rosa com contorno)")
+                saida.append(Image(path=p["imagem"]))
+            return saida
+        return r
+    if t.estado in ("erro", "cancelada"):
+        raise ToolError(f"tarefa {t.id} ({t.descricao}) {t.estado}: {t.erro}")
+    return {**t.resumo(), "aviso": "continua em segundo plano; acompanhe com `tarefas(id=...)` "
+                                   "(acao='esperar' aguarda até 50 s; acao='cancelar' interrompe)"}
+
+
+async def _tarefa(nome: str, descricao: str, fn, *a, finalizar=None, **k):
+    ob = _objetos()
+    barra = _progresso(descricao)
+
+    def corpo(*aa, progresso, cancelar, etapa, **kk):
+        r = fn(*aa, progresso=progresso, cancelar=cancelar, etapa=etapa, **kk)
+        return finalizar(r) if finalizar else r
+    t = ob.iniciar_tarefa(nome, descricao, corpo, *a, ao_progresso=lambda f, _e: barra(f), **k)
+    await asyncio.to_thread(t.esperar, _ESPERA_TAREFA_S)
+    return _resposta_tarefa(t)
+
+
+def _objeto_versao(doc: Documento):
+    """finalizar de tarefa que cria versão: recarrega a janela e monta a resposta como as outras edições."""
+    return lambda v: _apos_edicao(v, doc)
+
+
+@ferramenta
+async def segmentar_objeto(pontos: list[list[float]] | None = None, caixa: list[float] | None = None,
+                           pontos_negativos: list[list[float]] | None = None, tempo: str = "atual",
+                           inicio: str | None = None, fim: str | None = None, modelo: str = "sam2.1-tiny",
+                           passo_quadros: int = 1) -> list | dict:
+    """IA local (SAM 2.1): encontra um objeto num quadro e o RASTREIA pelo trecho, gerando uma máscara (id 'obj1',
+    'obj2'...) usada por `remover_objeto`, `fundo_objeto`, `recortar_objeto` e `destacar_objeto`.
+    Antes, veja o quadro com `ver_quadros` para achar as coordenadas do objeto.
+    - pontos: [[x, y], ...] sobre o objeto, no quadro exibido em `tempo` (pixels do vídeo como exibido, ou frações
+      0–1). Um ponto no meio do objeto costuma bastar; vários ajudam em objetos com partes de cores diferentes.
+    - caixa: [x, y, largura, altura] em volta do objeto (mais seguro para pessoas/objetos grandes).
+    - pontos_negativos: pontos que NÃO são do objeto (para separar de coisas encostadas).
+    - inicio/fim: trecho a rastrear (padrão: o vídeo todo). Rastreia para a frente e para trás a partir de `tempo`.
+    - passo_quadros: k>1 roda a IA a cada k quadros (k vezes mais rápido; para objetos lentos).
+    Custo: ~2–4 s por quadro em CPU (3 s de vídeo a 30 fps ≈ 3–6 min) → roda como tarefa em segundo plano
+    (acompanhe com `tarefas`). Na primeira vez baixa o modelo (~156 MB). Devolve quadros de conferência com o
+    objeto pintado: CONFIRA antes de remover; se errou, use `ajustar_mascara`."""
+    doc, est = _doc()
+    ob = _objetos()
+    ob._ort()  # erro claro e imediato se o ONNX Runtime não estiver instalado
+    t = _t(tempo, est)
+    a = _t(inicio, est) if inicio is not None else None
+    b = _t(fim, est) if fim is not None else None
+    return await _tarefa("segmentar", "segmentando objeto", ob.segmentar, doc, t, pontos, pontos_negativos,
+                         caixa, inicio=a, fim=b, modelo=modelo, passo_quadros=passo_quadros)
+
+
+@ferramenta
+async def ajustar_mascara(tempo: str = "atual", pontos: list[list[float]] | None = None,
+                          pontos_negativos: list[list[float]] | None = None, caixa: list[float] | None = None,
+                          mascara: str | None = None) -> list | dict:
+    """Corrige uma máscara: refaz a segmentação com os prompts originais MAIS os novos no quadro em `tempo`
+    (pontos = partes do objeto que faltaram; pontos_negativos = o que entrou e não devia; caixa = nova caixa).
+    Cria uma máscara nova (a anterior continua valendo). mascara: 'obj1'... (padrão: a mais recente)."""
+    doc, est = _doc()
+    ob = _objetos()
+    ob._ort()
+    return await _tarefa("ajustar", "ajustando máscara", ob.ajustar, doc, mascara, _t(tempo, est), pontos,
+                         pontos_negativos, caixa)
+
+
+@ferramenta
+async def destacar_objeto(mascara: str | None = None, cor: str = "rosa", opacidade: float = 0.4,
+                          contorno: int = 3) -> list | dict:
+    """Pré-visualização: cria uma versão com o objeto da máscara pintado (cor/opacidade) e contornado, para o
+    usuário conferir no player. Depois de conferir, `desfazer` e aplique a edição real."""
+    doc, _ = _doc()
+    ob = _objetos()
+    return await _tarefa("destacar", "destacando objeto", ob.destacar, doc, mascara, cor, opacidade, contorno,
+                         finalizar=_objeto_versao(doc))
+
+
+@ferramenta
+async def remover_objeto(mascara: str | None = None, metodo: str = "auto", margem: int | None = None) -> list | dict:
+    """Remove o objeto da máscara (de `segmentar_objeto`) e reconstrói o fundo; cria uma versão.
+    metodo: 'auto' (mede o movimento da câmera e escolhe), 'fundo' (câmera parada: usa o fundo que aparece em
+    outros quadros + LaMa uma vez no que nunca aparece; estável e rápido), 'lama' (IA em cada quadro, ~7 s/quadro;
+    para câmera em movimento), 'rapido' (sem IA: as cores em volta escorrem para dentro; objetos pequenos/fundo
+    liso). margem: px a mais em volta da máscara (padrão 1% do lado menor). Para deixar o objeto transparente
+    em vez de reconstruir, use `recortar_objeto(inverter=True)`."""
+    doc, _ = _doc()
+    ob = _objetos()
+    return await _tarefa("remover", "removendo objeto", ob.remover, doc, mascara, metodo, margem,
+                         finalizar=_objeto_versao(doc))
+
+
+@ferramenta
+async def fundo_objeto(modo: str = "desfocar", intensidade: float = 20, cor: str = "verde",
+                       imagem: str | None = None, mascara: str | None = None) -> list | dict:
+    """Mantém o objeto da máscara e muda o FUNDO no trecho dela (cria uma versão).
+    modo: 'desfocar' (intensidade ≈ raio em px num vídeo 720p; 20 = bem desfocado), 'cor' (fundo liso; 'verde'
+    = chroma key, ou '#rrggbb'), 'imagem' (caminho de uma imagem, ajustada para cobrir o quadro), 'cinza'
+    (fundo em preto e branco, objeto colorido)."""
+    doc, _ = _doc()
+    ob = _objetos()
+    return await _tarefa("fundo", f"fundo: {modo}", ob.fundo, doc, mascara, modo, intensidade, cor, imagem,
+                         finalizar=_objeto_versao(doc))
+
+
+@ferramenta
+async def recortar_objeto(formato: str = "webm", inverter: bool = False, audio: bool = True,
+                          destino: str | None = None, mascara: str | None = None) -> list | dict:
+    """EXPORTA (arquivo novo ao lado do original; não é versão) só o trecho da máscara com fundo transparente:
+    formato 'webm' (VP9 com alfa; navegadores, OBS), 'mov'/'prores' (ProRes 4444 com alfa; editores de vídeo) ou
+    'mascara' (vídeo preto e branco da máscara, para usar como matte em outro editor). inverter=True: o objeto
+    fica transparente e o resto visível. audio: leva o áudio do trecho."""
+    doc, _ = _doc()
+    ob = _objetos()
+    return await _tarefa("recortar", f"recortando objeto ({formato})", ob.recortar, doc, mascara, formato,
+                         inverter, audio, destino)
+
+
+@ferramenta
+async def tarefas(id: str | None = None, acao: str = "estado") -> list | dict:
+    """Tarefas longas de IA (segmentar/remover objeto...). Sem id: lista as recentes.
+    acao: 'estado' (progresso), 'esperar' (aguarda até 50 s e devolve o resultado se terminar), 'cancelar'."""
+    ob = _objetos()
+    if not id:
+        return {"tarefas": [t.resumo() for t in sorted(ob.TAREFAS.values(), key=lambda x: x.inicio)]}
+    t = ob.TAREFAS.get(id)
+    if not t:
+        raise ValueError(f"tarefa {id!r} não existe (o servidor MCP foi reiniciado?)")
+    if acao == "cancelar":
+        t.cancelar()
+        await asyncio.to_thread(t.esperar, 15)
+        return t.resumo()
+    if acao == "esperar":
+        await asyncio.to_thread(t.esperar, _ESPERA_TAREFA_S)
+    elif acao != "estado":
+        raise ValueError("acao: 'estado', 'esperar' ou 'cancelar'")
+    if t.estado in ("na fila", "rodando"):
+        return t.resumo()
+    return _resposta_tarefa(t)
+
+
+@ferramenta
+async def objetos_ia(baixar: list[str] | None = None) -> dict:
+    """Situação da IA de objetos: ONNX Runtime instalado?, modelos baixados (e licenças), memória livre e as
+    máscaras do vídeo aberto. baixar=['sam2.1-tiny', 'lama'] baixa os modelos agora (em segundo plano)."""
+    ob = _objetos()
+    r = ob.disponivel()
+    try:
+        doc, _ = _doc()
+        r["mascaras"] = ob.listar_mascaras(doc)
+    except Exception:  # noqa: BLE001
+        pass
+    if baixar:
+        for nome in baixar:
+            if nome not in ob.MODELOS:
+                raise ValueError(f"modelo desconhecido: {nome}; opções: {', '.join(ob.MODELOS)}")
+
+        def baixar_todos(progresso, cancelar, etapa):
+            for i, nome in enumerate(baixar):
+                etapa(f"baixando {nome}")
+                ob.baixar_modelo(nome, lambda f, i=i: progresso((i + f) / len(baixar)), cancelar)
+            return ob.disponivel()
+        t = ob.iniciar_tarefa("baixar", f"baixando {', '.join(baixar)}", baixar_todos)
+        r["tarefa"] = t.resumo()
+    return r
+
+
 def main():
     mcp.run()
 
