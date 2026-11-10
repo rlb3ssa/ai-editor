@@ -57,24 +57,55 @@ Claude (Code/Desktop) ──stdio/MCP──> claude-player-mcp ──socket Unix
 
 ## 3. Roadmap
 
-### Fase 1 — Base portátil (Linux)
+Ordem aprovada em 2026-11-10: primeiro o que o usuário mais usa no dia a dia, depois IA, por último a distribuição.
+Convenção: **editar** cria versões temporárias do mesmo arquivo (o original só muda com `salvar`);
+**exportar** cria um arquivo novo ao lado do original e não mexe em nada.
+
+### Fase 1 — Base (Linux)
 - [x] Renomear pacote/comandos para `ai-editor` / `ai-editor-mcp`.
 - [x] Modo dev: instância separada (`ai-editor-dev`) com recarga automática ao salvar código.
 - [x] Trocar o embutimento por `wid` pela **render API do libmpv** num `QOpenGLWidget` (X11 + Wayland, mouse nativo do Qt). VAAPI com interop confirmado em X11.
 - [x] Localizar binários: variável `AI_EDITOR_<NOME>` → pacote → sob demanda → sistema (`binarios.py`), com `ai-editor --diagnostico` e ferramenta MCP `diagnostico`.
 - [x] Lixeira própria no padrão freedesktop (`lixeira.py`), sem depender do `gio`.
-- [x] Modal de metadados (botão ⓘ / Ctrl+I) com copiar tudo.
-- [ ] Comando `ai-editor --instalar`: registra o MCP no Claude Code e no Claude Desktop, cria o `.desktop` e associa tipos MIME (opcional).
-- [ ] `--desinstalar` simétrico.
+- [x] Modal de metadados (botão ⓘ / Ctrl+I) com copiar tudo; C2PA via c2patool.
+- [x] Marcas N na régua (m1, m2…) com trechos coloridos visíveis para o Claude.
+- [x] Corrigir `INVALID_ENUM` do OpenGL (religar o FBO do widget após o render do mpv).
 
-### Fase 2 — Empacotamento
-- [ ] AppImage com Python embutido (PyInstaller ou Nuitka), Qt, libmpv, ffmpeg estático, mediainfo, exiftool.
-- [ ] Bundle `.mcpb` para o Claude Desktop apontando para o AppImage.
-- [ ] GitHub Actions: build do AppImage a cada tag e publicação na Release.
-- [ ] Atualização via zsync/AppImageUpdate.
-- [ ] Conformidade GPL: listar componentes, versões e link para o código-fonte de cada binário distribuído.
+### Fase 2 — Exportar / converter
+- [ ] `exportar(formato, predefinicao, trecho?)`: arquivo novo ao lado do original (`video.whatsapp.mp4`).
+- [ ] Predefinições: WhatsApp, YouTube, Instagram/Reels, GIF, MP3, "menor tamanho", "até X MB" (2 passes).
+- [ ] Exportar só um trecho ou só os trechos marcados.
+- [ ] Exportar com transparência (WebM VP9 `yuva420p` / ProRes 4444).
+- [ ] Foto de um quadro (PNG).
+- [ ] Botão de exportar na janela, com progresso.
 
-### Fase 3 — Objetos: destacar e remover
+### Fase 3 — Imagem
+- [ ] Recortar área (crop), girar, espelhar, mudar resolução.
+- [ ] Mudar proporção (16:9 → 9:16, com fundo desfocado ou recorte).
+- [ ] Brilho, contraste, saturação; estabilizar (`vidstab`/`deshake`).
+- [ ] Câmera lenta / acelerar num trecho; congelar quadro.
+- [ ] Texto e marca d'água por cima; borrar uma área num trecho (placa, rosto).
+
+### Fase 4 — Áudio prático
+- [ ] Redução de ruído: RNNoise (`arnndn`, embutido); DeepFilterNet sob demanda.
+- [ ] Tirar silêncios automaticamente (`silencedetect`).
+- [ ] Fade in/out; trocar ou adicionar música de fundo (com ducking).
+- [ ] Extrair só o áudio (MP3/WAV/Opus).
+- [ ] Separar voz da música (Demucs, sob demanda).
+
+### Fase 5 — Montagem e análise
+- [ ] Juntar outro arquivo (emendar vídeos diferentes, normalizando resolução/fps/áudio).
+- [ ] Dividir em partes (por marcas ou a cada N minutos).
+- [ ] Detectar cortes de cena (sugestões de pontos de corte).
+- [ ] Capítulos: mostrar na régua, criar e editar.
+- [ ] Relatório técnico: bitrate, qualidade, sinais de recompressão.
+
+### Fase 6 — Legendas e fala (IA local)
+- [ ] Transcrição local com Whisper (whisper.cpp sob demanda, ou o filtro `whisper` do ffmpeg 8).
+- [ ] Gerar `.srt`/`.vtt` e gravar legenda no vídeo (libass).
+- [ ] Edição pelo texto ("corta onde ele fala X").
+
+### Fase 7 — Objetos: destacar e remover (IA local)
 Fluxo: o Claude localiza o objeto nos quadros → segmenta e rastreia → mostra o contorno para confirmação → remove (transparente ou reconstruído).
 
 - [ ] Ambiente de IA separado, carregado sob demanda; modelos baixados no primeiro uso para `~/.local/share/ai-editor/modelos`.
@@ -82,17 +113,24 @@ Fluxo: o Claude localiza o objeto nos quadros → segmenta e rastreia → mostra
 - [ ] `segmentar_objeto(pontos|caixa, tempo)`: SAM 2.1 tiny, rastreamento por todos os quadros, máscara salva junto das versões.
 - [ ] `ajustar_mascara`: pontos positivos/negativos para refinar.
 - [ ] `destacar_objeto`: versão de pré-visualização com contorno e realce.
-- [ ] `remover_objeto(modo="transparente")`: exporta com alfa (WebM VP9 `yuva420p` ou ProRes 4444).
+- [ ] `remover_objeto(modo="transparente")`: exporta com alfa.
 - [ ] `remover_objeto(modo="consertar")`:
   - câmera parada: LaMa em um quadro e o mesmo remendo aplicado em todos (estável, rápido);
   - câmera em movimento: propagação por fluxo óptico + preenchimento; avaliar alternativa de licença livre ao ProPainter (licença não comercial).
 - [ ] Tarefas longas em segundo plano: a ferramenta devolve um id, `tarefas` consulta o progresso, a janela mostra a barra.
 
-### Fase 4 — Depois
-- [ ] Legendas (transcrição local com Whisper) e edição por texto.
-- [ ] Redução de ruído no áudio.
-- [ ] Exportar com predefinições (WhatsApp, YouTube, GIF).
-- [ ] Outras plataformas (Windows/macOS) — depende da render API da Fase 1.
+### Fase 8 — Distribuição
+- [ ] AppImage com Python embutido (PyInstaller ou Nuitka), Qt, libmpv, ffmpeg estático, mediainfo, exiftool, c2patool.
+- [ ] `ai-editor --instalar`: registra o MCP no Claude Code e no Claude Desktop, cria o `.desktop`, atalho em `~/.local/bin` e associa tipos MIME (opcional).
+- [ ] `--desinstalar` simétrico.
+- [ ] Bundle `.mcpb` para o Claude Desktop apontando para o AppImage.
+- [ ] GitHub Actions: build do AppImage a cada tag e publicação na Release.
+- [ ] Atualização via zsync/AppImageUpdate.
+- [ ] Conformidade GPL: listar componentes, versões e link para o código-fonte de cada binário distribuído.
+- [ ] Testar numa sessão Wayland real.
+
+### Depois
+- [ ] Outras plataformas (Windows/macOS) — a render API já ajuda.
 
 ## 4. Fluxo de desenvolvimento
 
@@ -167,6 +205,8 @@ Projeto: **GPL-3.0**.
 - 2026-11-09: nome do pacote/comando `ai-editor`; app "AI Editor".
 - 2026-11-09: inventário de ferramentas aprovado (seção 5).
 - 2026-11-09: IAs rodam localmente em CPU (sem LLM extra); o Claude faz o papel de "cérebro" via MCP.
+- 2026-11-10: roadmap reordenado (exportar → imagem → áudio → montagem → legendas → objetos → distribuição); `--instalar` e AppImage ficam por último.
+- 2026-11-10: "pistas de origem" são regras locais (`core._PISTAS_*`), sem IA: funcionam offline e sem o Claude conectado.
 
 ## 8. Questões em aberto
 - Manter o idioma da interface em português ou adicionar i18n desde já?

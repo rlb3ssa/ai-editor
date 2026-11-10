@@ -36,7 +36,7 @@ def secoes(rel: dict) -> list[tuple[str, list[tuple[str, str]]]]:
     s: list[tuple[str, list[tuple[str, str]]]] = []
     s.append(("Arquivo", [("caminho", rel.get("arquivo", ""))]))
     pistas = rel.get("pistas_de_origem") or []
-    s.append(("Pistas de origem", [("•", p) for p in pistas] or [("", "nenhuma pista encontrada")]))
+    s.append(("Pistas de origem (regras automáticas)", [("•", p) for p in pistas] or [("", "nenhuma pista encontrada")]))
     resumo = dict(rel.get("resumo") or {})
     faixas = resumo.pop("faixas", []) or []
     linhas = [(k, v) for k, v in _achatar(resumo) if v not in ("", "None", "0")]

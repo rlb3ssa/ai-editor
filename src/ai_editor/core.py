@@ -647,6 +647,8 @@ def metadados(arquivo: Path | str, profundo: bool = False, hash_: bool = False) 
         rel["exiftool"] = {"indisponivel": "instale: sudo apt install libimage-exiftool-perl"}
     if ferramenta("c2patool"):
         rel["c2pa"] = _rodar_json([ferramenta("c2patool"), str(p)])
+        if "No claim found" in str(rel["c2pa"].get("erro", "")) if isinstance(rel["c2pa"], dict) else False:
+            rel["c2pa"] = {"status": "sem Content Credentials (o arquivo não tem manifesto C2PA)"}
     else:
         rel["c2pa"] = {"indisponivel": "c2patool não instalado"}
 
@@ -670,11 +672,11 @@ def _pistas(p: Path, rel: dict) -> list[str]:
             pistas.append(txt)
     urls = sorted(set(re.findall(r"https?://[^\s\"'\\]+", blob)))
     for u in urls[:10]:
-        if "c2pa.org" in u or "w3.org" in u or "adobe.com/xap" in u or "ns.adobe.com" in u:
+        if "c2pa.org" in u or "schema.org" in u or "w3.org" in u or "adobe.com/xap" in u or "ns.adobe.com" in u:
             continue
         pistas.append(f"URL embutida nos metadados: {u}")
     c2 = rel.get("c2pa")
-    if isinstance(c2, dict) and c2 and not ({"erro", "indisponivel"} & set(c2)):
+    if isinstance(c2, dict) and c2.get("manifests"):
         pistas.append("possui Content Credentials (C2PA): veja a seção c2pa")
     return pistas
 
