@@ -520,15 +520,6 @@ class Janela(QMainWindow):
         btn("ray-start-arrow", "Marcar entrada IN (I)", lambda: self.marcar(entrada=self.pos)).setIcon(icone("ray-start-arrow", "#ffc400"))
         btn("ray-end-arrow", "Marcar saída OUT (O)", lambda: self.marcar(saida=self.pos)).setIcon(icone("ray-end-arrow", "#ffc400"))
         sep()
-        self.l_tempo = QLabel("--:--:--.--- / --:--:--.---")
-        self.l_tempo.setObjectName("tempo")
-        f = QFont("JetBrains Mono, DejaVu Sans Mono, monospace", 12)
-        f.setStyleHint(QFont.Monospace)
-        f.setWeight(QFont.DemiBold)
-        self.l_tempo.setFont(f)
-        self.l_tempo.setMinimumWidth(self.l_tempo.fontMetrics().horizontalAdvance("00:00:00.000 / 00:00:00.000") + 8)
-        self.l_tempo.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        bl.addWidget(self.l_tempo)
         self.l_quadro = QLabel("")
         self.l_quadro.setObjectName("sutil")
         bl.addWidget(self.l_quadro)
@@ -577,9 +568,33 @@ class Janela(QMainWindow):
         lr = QHBoxLayout()
         lr.setContentsMargins(0, 0, 0, 0)
         lr.setSpacing(0)
-        canto = QLabel("  tempo")
+        # canto à esquerda da régua: tempo atual (grande) e duração total (menor)
+        canto = QWidget()
+        canto.setObjectName("canto")
         canto.setFixedWidth(CAB)
-        canto.setStyleSheet("color:#8b949e")
+        canto.setAttribute(Qt.WA_StyledBackground)
+        lc = QVBoxLayout(canto)
+        lc.setContentsMargins(10, 3, 6, 3)
+        lc.setSpacing(0)
+        mono = QFont("JetBrains Mono, DejaVu Sans Mono, monospace")
+        mono.setStyleHint(QFont.Monospace)
+        self.l_tempo = QLabel("--:--:--.---")
+        self.l_tempo.setObjectName("tempo")
+        f = QFont(mono)
+        f.setPointSize(12)
+        f.setWeight(QFont.DemiBold)
+        self.l_tempo.setFont(f)
+        self.l_tempo.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.l_tempo.setToolTip("Posição atual (hh:mm:ss.ms)")
+        self.l_total = QLabel("/ --:--:--.---")
+        self.l_total.setObjectName("total")
+        f = QFont(mono)
+        f.setPointSize(9)
+        self.l_total.setFont(f)
+        self.l_total.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.l_total.setToolTip("Duração total")
+        lc.addWidget(self.l_tempo)
+        lc.addWidget(self.l_total)
         lr.addWidget(canto)
         self.regua = Regua(self)
         lr.addWidget(self.regua, 1)
@@ -901,7 +916,8 @@ class Janela(QMainWindow):
             self.pos = float(t)
             if not pausado:
                 self.visao.seguir(self.pos)
-        self.l_tempo.setText(f"{fmt_tempo(self.pos)} / {fmt_tempo(self.visao.dur)}")
+        self.l_tempo.setText(fmt_tempo(self.pos))
+        self.l_total.setText(f"/ {fmt_tempo(self.visao.dur)}")
         fps = self.fps
         self.l_quadro.setText(f"q{int(round(self.pos * fps))}" if fps else "")
         self.l_quadro.setToolTip(f"quadro {int(round(self.pos * fps))} @ {fps:.3f} fps" if fps else "")
@@ -1003,6 +1019,12 @@ class Janela(QMainWindow):
         elif cmd == "zoom":
             ini, fim = float(a["ini"]), float(a["fim"])
             self.visao._por(ini, max(fim - ini, 0.05))
+        elif cmd == "capturar":
+            # print da janela renderizado pelo Qt (funciona mesmo atrás de outras janelas;
+            # a área do vídeo pode sair preta, pois quem desenha nela é o mpv)
+            destino = a.get("arquivo") or str(RUNTIME_DIR / "captura.png")
+            self.grab().save(destino)
+            return {"arquivo": destino}
         elif cmd == "zoom_video":
             self.tela.definir(float(a.get("zoom", 0)), float(a.get("x", 0)), float(a.get("y", 0)))
         elif cmd == "mix":
@@ -1141,7 +1163,9 @@ QToolButton#solo:checked { background: #c9a227; }
 QToolButton#salvar { background: #2e6fbf; color: white; padding: 4px 12px 4px 8px; font-weight: 600; }
 QToolButton#salvar:hover { background: #3a80d6; }
 QToolButton#salvar:disabled { background: #262b34; color: #4a4f5a; }
-QLabel#tempo { color: #e6edf3; padding: 0 4px; }
+QWidget#canto { background: #0d1117; border-right: 1px solid #21262d; }
+QLabel#tempo { color: #e6edf3; }
+QLabel#total { color: #8b949e; }
 QLabel#sutil { color: #6e7681; }
 QLabel#versao { color: #8b949e; padding-right: 6px; }
 QLineEdit { background: #15171c; border: 1px solid #2f3540; border-radius: 6px; padding: 4px 6px; color: #c9d1d9; }
