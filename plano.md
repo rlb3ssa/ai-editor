@@ -27,7 +27,7 @@ Claude (Code/Desktop) ──stdio/MCP──> claude-player-mcp ──socket Unix
 
 | Módulo | Papel |
 |---|---|
-| `app.py` | Janela PySide6 + libmpv: vídeo, controles, régua com zoom, uma onda por faixa de áudio, mix (mudo/solo/volume), marcas IN/OUT, zoom/arraste no vídeo, servidor de controle por socket |
+| `app.py` | Janela PySide6 + libmpv: vídeo, controles, régua com zoom, uma onda por faixa de áudio, mix (mudo/solo/volume), N marcas com trechos coloridos, zoom/arraste no vídeo, servidor de controle por socket |
 | `core.py` | Núcleo: tempos, chamadas ao ffmpeg, versões (`Documento`), cortes precisos, filtros de áudio, faixas, metadados completos |
 | `ondas.py` | Picos de áudio (200/s) com cache em `~/.cache/claude-player/ondas` |
 | `cliente.py` | Cliente do socket (`$XDG_RUNTIME_DIR/claude-player/controle.sock`) |
@@ -45,7 +45,8 @@ Claude (Code/Desktop) ──stdio/MCP──> claude-player-mcp ──socket Unix
 
 ### 2.4 Interface
 - Ícones Phosphor (QtAwesome); variável `CLAUDE_PLAYER_ICONES=mdi6` volta ao Material.
-- Barra de progresso com precisão de milissegundos, zoom/pan na régua, marcação IN/OUT pelo botão direito.
+- Barra de progresso com precisão de milissegundos, zoom/pan na régua.
+- Marcas: botão de seta (ou tecla I) marca N pontos; trechos entre marcas consecutivas ganham cores em ciclo (amarelo, ciano, rosa, verde, laranja, violeta). O Claude lê as marcas pelo `estado` e usa `m1`, `m2`... como tempos. Botão direito na régua adiciona/remove.
 - Roda do mouse no vídeo = zoom no ponto; arrastar = mover; duplo clique = 100%.
 - Arquivos só de áudio escondem a área de vídeo e aumentam as ondas.
 
@@ -97,7 +98,7 @@ Fluxo: o Claude localiza o objeto nos quadros → segmenta e rastreia → mostra
   forçar com `AI_EDITOR_DEV=0/1`. Usa nome/socket próprios (`ai-editor-dev`, `$XDG_RUNTIME_DIR/ai-editor-dev/`),
   então convive com a versão instalada (`ai-editor`).
 - **Recarga automática**: ao salvar um `.py` da janela, ela se reinicia mantendo arquivo, posição, pausa,
-  marcas IN/OUT, zoom do vídeo e geometria. Se o arquivo tiver erro de sintaxe, a recarga é cancelada e o
+  marcas, zoom do vídeo e geometria. Se o arquivo tiver erro de sintaxe, a recarga é cancelada e o
   erro aparece na barra de status. Mudanças só em `mcp_server.py` exigem `/mcp` → reconectar.
 - **MCP dev**: registrado como `ai-editor-dev` (`claude mcp add --scope user ai-editor-dev -- <repo>/.venv/bin/ai-editor-mcp`).
 - **Player padrão** durante o desenvolvimento: `~/.local/share/applications/ai-editor-dev.desktop`.

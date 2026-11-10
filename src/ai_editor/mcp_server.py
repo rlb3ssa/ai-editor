@@ -23,7 +23,11 @@ mcp = MCPServer(
     instructions=(
         "Controla a janela de vídeo do usuário (AI Editor) e edita com ffmpeg.\n"
         "- Tempos aceitam segundos (83.456), '1:23.456', '1500ms' ou palavras: 'atual'/'aqui', "
-        "'in', 'out', 'inicio', 'fim' e expressões como 'atual-2' ou 'out+0.5'.\n"
+        "'inicio', 'fim', marcas 'm1', 'm2'... e expressões como 'atual-2' ou 'm3+0.5'.\n"
+        "- O usuário marca N pontos na régua (botão de seta ou tecla I). As marcas são numeradas por ordem de "
+        "tempo (m1, m2...) e cada par consecutivo forma um trecho colorido (m1→m2 amarelo, m2→m3 ciano...). "
+        "Quando ele falar de 'marcas', 'pontos' ou de um trecho por cor, consulte `estado` (campos `marcas` e "
+        "`trechos_marcados`). 'in' = primeira marca, 'out' = última.\n"
         "- Faixas de áudio são numeradas a partir de 1 (A1, A2...), como na janela.\n"
         "- Toda edição cria uma versão temporária (v1, v2...) e a janela recarrega sozinha. "
         "O original só é substituído com `salvar`, que deve ser chamado APENAS quando o usuário pedir.\n"
@@ -112,7 +116,7 @@ async def abrir(arquivo: str) -> dict:
 
 @ferramenta
 async def estado() -> dict:
-    """Estado atual do player: arquivo, posição (ms), duração, pausado, marcas IN/OUT,
+    """Estado atual do player: arquivo, posição (ms), duração, pausado, marcas (m1, m2...) e trechos coloridos,
     fps/quadro, faixas de áudio (mudo/solo/volume) e versões não salvas."""
     return _estado()
 
@@ -141,12 +145,14 @@ async def controlar(acao: str, valor: str | None = None) -> dict:
 
 
 @ferramenta
-async def marcar(entrada: str | None = None, saida: str | None = None, limpar: bool = False) -> dict:
-    """Define as marcas IN/OUT na régua (ex.: entrada='atual', saida='1:23.456'). limpar=True remove ambas."""
+async def marcar(adicionar: list[str] | None = None, remover: list[int] | None = None,
+                 limpar: bool = False) -> dict:
+    """Marca pontos na régua, como o usuário faz com o botão de seta.
+    adicionar: tempos (ex.: ['atual', '1:23.456']); remover: números das marcas (1 = a mais cedo);
+    limpar=True remove todas antes. Devolve as marcas e os trechos coloridos entre elas."""
     est = _estado()
-    return cliente.enviar("marcar",
-                          entrada=_t(entrada, est) if entrada is not None else None,
-                          saida=_t(saida, est) if saida is not None else None, limpar=limpar)
+    return cliente.enviar("marcar", adicionar=[_t(x, est) for x in adicionar or []],
+                          remover=remover or [], limpar=limpar)
 
 
 @ferramenta
@@ -227,7 +233,7 @@ async def analisar_audio(faixa: int = 1, inicio: str | None = None, fim: str | N
 # ---------------------------------------------------------------- edição
 @ferramenta
 async def cortar(inicio: str = "in", fim: str = "out", preciso: bool = True) -> dict:
-    """Mantém SÓ o trecho [inicio, fim] (padrão: entre as marcas IN e OUT).
+    """Mantém SÓ o trecho [inicio, fim] (padrão: da primeira à última marca; ex.: inicio='m2', fim='m3').
     preciso=True re-encoda (corte exato ao milissegundo/quadro); False é instantâneo e sem perda,
     mas o corte cai no keyframe mais próximo (pode incluir alguns quadros a mais)."""
     doc, est = _doc()
@@ -241,7 +247,7 @@ async def cortar(inicio: str = "in", fim: str = "out", preciso: bool = True) -> 
 @ferramenta
 async def remover_trechos(trechos: list[list[str]], preciso: bool = True) -> dict:
     """Remove um ou mais trechos e junta o resto. trechos: [[inicio, fim], ...],
-    ex. [["in","out"]] ou [["0:10","0:12.5"],["1:00","1:03"]]."""
+    ex. [["m1","m2"],["m3","m4"]] ou [["0:10","0:12.5"],["1:00","1:03"]]."""
     doc, est = _doc()
     dur = core.duracao(core.ffprobe(doc.atual()))
     rem = [(_t(a, est), _t(b, est)) for a, b in trechos]

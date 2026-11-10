@@ -36,8 +36,15 @@ COR_TRILHA = QColor("#1f232b")
 COR_ONDA = QColor("#4fa3ff")
 COR_ONDA_MUDA = QColor("#4a4f5a")
 COR_CABECA = QColor("#ff4757")
-COR_INOUT = QColor(255, 196, 0, 50)
-COR_MARCA = QColor("#ffc400")
+# cores dos trechos entre marcas consecutivas (1→2, 2→3, ...), em ciclo
+CORES_TRECHOS = ["#ffc400", "#22d3ee", "#f472b6", "#4ade80", "#fb923c", "#a78bfa"]
+NOMES_CORES = ["amarelo", "ciano", "rosa", "verde", "laranja", "violeta"]
+
+
+def cor_trecho(i: int, alfa: int = 255) -> QColor:
+    c = QColor(CORES_TRECHOS[i % len(CORES_TRECHOS)])
+    c.setAlpha(alfa)
+    return c
 COR_PROGRESSO = QColor("#2e6fbf")
 COR_TEXTO = QColor("#c9d1d9")
 ICONE = "#c9d1d9"
@@ -56,8 +63,7 @@ _PHOSPHOR = {
     "step-forward": "caret-right-fill",
     "play": "play-fill",
     "pause": "pause-fill",
-    "ray-start-arrow": "arrow-line-left",
-    "ray-end-arrow": "arrow-line-right",
+    "arrow-collapse-up": "arrow-line-up",
     "crosshairs-gps": "crosshair-simple",
     "volume-high": "speaker-high",
     "volume-off": "speaker-x",
@@ -142,9 +148,14 @@ class AreaTempo(QWidget):
         elif e.button() == Qt.RightButton:
             t = self.v.x_para_t(e.position().x(), self.width())
             m = QMenu(self)
-            m.addAction(f"Marcar IN em {fmt_tempo(t)}", lambda: self.j.marcar(entrada=t))
-            m.addAction(f"Marcar OUT em {fmt_tempo(t)}", lambda: self.j.marcar(saida=t))
-            m.addAction("Limpar marcas", lambda: self.j.marcar(limpar=True))
+            m.addAction(icone("arrow-collapse-up", CORES_TRECHOS[0]), f"Adicionar marca em {fmt_tempo(t)}",
+                        lambda: self.j.marcar(adicionar=[t]))
+            if self.j.marcas:
+                # marca mais próxima do clique
+                i = min(range(len(self.j.marcas)), key=lambda k: abs(self.j.marcas[k] - t))
+                m.addAction(f"Remover marca {i + 1} ({fmt_tempo(self.j.marcas[i])})",
+                            lambda: self.j.marcar(remover=[i + 1]))
+                m.addAction("Limpar todas as marcas", lambda: self.j.marcar(limpar=True))
             m.addSeparator()
             m.addAction("Ver tudo (zoom total)", lambda: self.v.zoom(1e9, 0))
             m.exec(e.globalPosition().toPoint())
@@ -172,16 +183,27 @@ class AreaTempo(QWidget):
     def sobreposicao(self, p: QPainter):
         w, h = self.width(), self.height()
         j = self.j
-        if j.marca_in is not None or j.marca_out is not None:
-            a = j.marca_in if j.marca_in is not None else 0.0
-            b = j.marca_out if j.marca_out is not None else self.v.dur
-            xa, xb = self.v.t_para_x(a, w), self.v.t_para_x(b, w)
-            p.fillRect(QRectF(xa, 0, xb - xa, h), COR_INOUT)
-            p.setPen(QPen(COR_MARCA, 1))
-            for t in (j.marca_in, j.marca_out):
-                if t is not None:
-                    x = self.v.t_para_x(t, w)
-                    p.drawLine(QPointF(x, 0), QPointF(x, h))
+        ms = j.marcas
+        # trechos entre marcas consecutivas, cada um com uma cor
+        for i in range(len(ms) - 1):
+            xa, xb = self.v.t_para_x(ms[i], w), self.v.t_para_x(ms[i + 1], w)
+            p.fillRect(QRectF(xa, 0, xb - xa, h), cor_trecho(i, 48))
+        rotulos = isinstance(self, Regua)
+        if rotulos:
+            p.setFont(QFont("DejaVu Sans", 7, QFont.Bold))
+        for i, t in enumerate(ms):
+            x = self.v.t_para_x(t, w)
+            cor = cor_trecho(min(i, max(len(ms) - 2, 0)))
+            p.setPen(QPen(cor, 1))
+            p.drawLine(QPointF(x, 0), QPointF(x, h))
+            if rotulos:
+                r = QRectF(x - 8, h - 13, 16, 12)
+                p.setBrush(cor)
+                p.setPen(Qt.NoPen)
+                p.drawRoundedRect(r, 3, 3)
+                p.setPen(QColor("#0d1117"))
+                p.drawText(r, Qt.AlignCenter, str(i + 1))
+                p.setBrush(Qt.NoBrush)
         x = self.v.t_para_x(j.pos, w)
         p.setPen(QPen(COR_CABECA, 1.5))
         p.drawLine(QPointF(x, 0), QPointF(x, h))
@@ -530,8 +552,7 @@ class Janela(QMainWindow):
         self.doc: Documento | None = None
         self.arquivo: Path | None = None
         self.pos = 0.0
-        self.marca_in: float | None = None
-        self.marca_out: float | None = None
+        self.marcas: list[float] = []  # pontos marcados (s), sempre em ordem
         self.linhas: list[LinhaFaixa] = []
         self.faixas_mpv: list[dict] = []
         self._start_pendente = False
@@ -590,7 +611,7 @@ class Janela(QMainWindow):
             lay.setSpacing(2)
             return w, lay
 
-        # três grupos: esquerda (pasta) | centro (reprodução + IN/OUT) | direita (velocidade, volume, tela cheia).
+        # três grupos: esquerda (pasta) | centro (reprodução + marca) | direita (velocidade, volume, tela cheia).
         # Esquerda e direita ganham a mesma largura mínima para o centro ficar realmente centralizado.
         g_esq, esq = grupo()
         g_cen, cen = grupo()
@@ -605,8 +626,8 @@ class Janela(QMainWindow):
         btn("step-forward", "Próximo quadro (.)", lambda: self.quadros(1))
         btn("skip-next", "Fim (End)", lambda: self.pular(self.visao.dur))
         sep(cen)
-        btn("ray-start-arrow", "Marcar entrada IN (I)", lambda: self.marcar(entrada=self.pos)).setIcon(icone("ray-start-arrow", "#ffc400"))
-        btn("ray-end-arrow", "Marcar saída OUT (O)", lambda: self.marcar(saida=self.pos)).setIcon(icone("ray-end-arrow", "#ffc400"))
+        btn("arrow-collapse-up", "Marcar ponto (I) · botão direito na régua remove", lambda: self.marcar(adicionar=[self.pos])).setIcon(
+            icone("arrow-collapse-up", CORES_TRECHOS[0]))
         bl = alvo[0] = dir_
         bl.addStretch(1)
         self.vel = QComboBox()
@@ -709,7 +730,7 @@ class Janela(QMainWindow):
         raiz.addLayout(lsb)
         self.visao.mudou.connect(self._sinc_barra)
 
-        self.statusBar().showMessage("Arraste um arquivo para cá ou use Ctrl+O · roda no vídeo/régua = zoom · arrastar = mover · botão direito = IN/OUT")
+        self.statusBar().showMessage("Arraste um arquivo para cá ou use Ctrl+O · roda no vídeo/régua = zoom · arrastar = mover · I = marcar ponto · botão direito na régua = marcas")
 
         # mpv
         import mpv  # import tardio: precisa do locale numérico C
@@ -728,8 +749,7 @@ class Janela(QMainWindow):
             ("Space", self.alternar), ("Left", lambda: self.pular(self.pos - 1)),
             ("Right", lambda: self.pular(self.pos + 1)), ("Shift+Left", lambda: self.pular(self.pos - 10)),
             ("Shift+Right", lambda: self.pular(self.pos + 10)), (",", lambda: self.quadros(-1)),
-            (".", lambda: self.quadros(1)), ("I", lambda: self.marcar(entrada=self.pos)),
-            ("O", lambda: self.marcar(saida=self.pos)), ("Home", lambda: self.pular(0)),
+            (".", lambda: self.quadros(1)), ("I", lambda: self.marcar(adicionar=[self.pos])), ("Home", lambda: self.pular(0)),
             ("End", lambda: self.pular(self.visao.dur)), ("Ctrl+O", self.dialogo_abrir),
             ("Ctrl+S", self.salvar), ("Ctrl+Z", self.desfazer),
             ("+", lambda: self.visao.zoom(0.5, self.pos)), ("-", lambda: self.visao.zoom(2, self.pos)),
@@ -776,7 +796,7 @@ class Janela(QMainWindow):
             raise FileNotFoundError(p)
         self.doc = Documento(p)
         self.tela.resetar()
-        self.marca_in = self.marca_out = None
+        self.marcas = []
         self._carregar(self.doc.atual(), pos=0.0)
         self._set("pause", False)
         self.setWindowTitle(f"{self.doc.original.name} — {TITULO}")
@@ -830,16 +850,31 @@ class Janela(QMainWindow):
             fps = self.fps or 30
             self.pular(self.pos + n / fps)
 
-    def marcar(self, entrada=None, saida=None, limpar=False):
+    def marcar(self, adicionar=None, remover=None, limpar=False):
+        """adicionar: tempos (s); remover: números das marcas (1 = a mais cedo); limpar: tira todas."""
         if limpar:
-            self.marca_in = self.marca_out = None
-        if entrada is not None:
-            self.marca_in = entrada
-        if saida is not None:
-            self.marca_out = saida
-        if self.marca_in is not None and self.marca_out is not None and self.marca_in > self.marca_out:
-            self.marca_in, self.marca_out = self.marca_out, self.marca_in
+            self.marcas = []
+        if remover:
+            fora = {int(n) - 1 for n in remover}
+            self.marcas = [t for i, t in enumerate(self.marcas) if i not in fora]
+        for t in adicionar or []:
+            t = round(max(0.0, min(float(t), self.visao.dur or float(t))), 3)
+            if all(abs(t - m) > 0.0005 for m in self.marcas):
+                self.marcas.append(t)
+        self.marcas.sort()
         self._repintar()
+        return self.info_marcas()
+
+    def info_marcas(self) -> dict:
+        ms = self.marcas
+        return {
+            "marcas": [{"n": i + 1, "tempo": t, "tempo_fmt": fmt_tempo(t)} for i, t in enumerate(ms)],
+            "trechos_marcados": [
+                {"de": f"m{i + 1}", "ate": f"m{i + 2}", "inicio_fmt": fmt_tempo(ms[i]), "fim_fmt": fmt_tempo(ms[i + 1]),
+                 "duracao": round(ms[i + 1] - ms[i], 3), "cor": NOMES_CORES[i % len(NOMES_CORES)]}
+                for i in range(len(ms) - 1)
+            ],
+        }
 
     def editar_tempo(self):
         """Troca o tempo do canto da régua por um campo editável já preenchido e selecionado."""
@@ -1075,8 +1110,7 @@ class Janela(QMainWindow):
             "duracao": round(self.visao.dur, 3), "duracao_fmt": fmt_tempo(self.visao.dur),
             "pausado": bool(self._get("pause", True)), "velocidade": self._get("speed", 1.0),
             "fps": self.fps, "quadro": int(round(self.pos * self.fps)) if self.fps else None,
-            "marca_in": self.marca_in, "marca_in_fmt": fmt_tempo(self.marca_in) if self.marca_in is not None else None,
-            "marca_out": self.marca_out, "marca_out_fmt": fmt_tempo(self.marca_out) if self.marca_out is not None else None,
+            **self.info_marcas(),
             "visao": [fmt_tempo(self.visao.ini), fmt_tempo(self.visao.fim)],
             "faixas_audio": faixas,
         }
@@ -1133,7 +1167,7 @@ class Janela(QMainWindow):
         elif cmd == "quadros":
             self.quadros(int(a.get("n", 1)))
         elif cmd == "marcar":
-            self.marcar(entrada=a.get("entrada"), saida=a.get("saida"), limpar=a.get("limpar", False))
+            return self.marcar(adicionar=a.get("adicionar"), remover=a.get("remover"), limpar=a.get("limpar", False))
         elif cmd == "velocidade":
             self._set("speed", float(a["v"]))
         elif cmd == "zoom":
@@ -1223,7 +1257,7 @@ class Janela(QMainWindow):
         return {
             "arquivo": str(self.doc.original) if self.doc else None,
             "pos": self.pos, "pausado": bool(self._get("pause", True)),
-            "in": self.marca_in, "out": self.marca_out,
+            "marcas": self.marcas,
             "zoom": self.tela.zoom, "pan": self.tela.pan,
             "geo": [g.x(), g.y(), g.width(), g.height()],
             "max": self.isMaximized(),
@@ -1254,7 +1288,7 @@ class Janela(QMainWindow):
         self._carregar(self.doc.atual(), pos=float(e.get("pos") or 0))
         self._set("pause", bool(e.get("pausado", True)))
         self.setWindowTitle(f"{self.doc.original.name} — {TITULO}")
-        self.marca_in, self.marca_out = e.get("in"), e.get("out")
+        self.marcas = sorted(e.get("marcas") or [])
         self.tela.definir(e.get("zoom", 0), *(e.get("pan") or [0, 0]))
         self.statusBar().showMessage("[dev] código recarregado", 3000)
 

@@ -60,24 +60,34 @@ _KW = {
 
 def parse_tempo(valor, estado: dict | None = None) -> float:
     """Aceita 83.456, "83.456", "1:23.456", "00:01:23,456", "1500ms",
-    ou palavras: atual/aqui, in/entrada, out/saida, inicio, fim.
-    Também aceita expressões simples: "atual-2", "in+0.5", "out - 1:00"."""
+    ou palavras: atual/aqui, inicio, fim, marcas m1, m2... (numeradas por ordem de tempo),
+    in/entrada (= primeira marca), out/saida (= última marca).
+    Também aceita expressões simples: "atual-2", "m2+0.5", "out - 1:00"."""
     if isinstance(valor, (int, float)):
         return float(valor)
     s = str(valor).strip().lower().replace(",", ".")
-    m = re.fullmatch(r"([a-zçíá]+)\s*([+-])\s*(.+)", s)
-    if m and m.group(1) in _KW:
+    m = re.fullmatch(r"([a-zçíá]+\d*)\s*([+-])\s*(.+)", s)
+    if m and (m.group(1) in _KW or re.fullmatch(r"m\d+", m.group(1))):
         base = parse_tempo(m.group(1), estado)
         d = parse_tempo(m.group(3), estado)
         return base + d if m.group(2) == "+" else base - d
+    if re.fullmatch(r"m\d+", s):
+        if estado is None:
+            raise ValueError(f"'{valor}' precisa do player aberto")
+        marcas = [m["tempo"] for m in estado.get("marcas") or []]
+        n = int(s[1:])
+        if not 1 <= n <= len(marcas):
+            raise ValueError(f"marca {s} não existe (há {len(marcas)} marca(s))")
+        return float(marcas[n - 1])
     if s in _KW:
         k = _KW[s]
         if k == "inicio":
             return 0.0
         if estado is None:
             raise ValueError(f"'{valor}' precisa do player aberto")
-        v = {"pos": estado.get("posicao"), "in": estado.get("marca_in"),
-             "out": estado.get("marca_out"), "fim": estado.get("duracao")}[k]
+        marcas = [m["tempo"] for m in estado.get("marcas") or []]
+        v = {"pos": estado.get("posicao"), "in": marcas[0] if marcas else None,
+             "out": marcas[-1] if marcas else None, "fim": estado.get("duracao")}[k]
         if v is None:
             raise ValueError(f"'{valor}' não está definido no player")
         return float(v)
