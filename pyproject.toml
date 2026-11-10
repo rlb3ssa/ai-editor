@@ -1,7 +1,10 @@
 [project]
 name = "ai-editor"
 version = "0.1.0"
-description = "Player de vídeo leve controlado pelo Claude via MCP"
+description = "Player e editor de vídeo/áudio leve para Linux, controlado por IA via MCP"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
+readme = "README.md"
 authors = [
     { name = "Richardson", email = "richardsonlbessa@gmail.com" }
 ]
