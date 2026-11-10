@@ -51,7 +51,7 @@ Claude (Code/Desktop) ──stdio/MCP──> claude-player-mcp ──socket Unix
 - Arquivos só de áudio escondem a área de vídeo e aumentam as ondas.
 
 ### 2.5 Limitações conhecidas
-- Depende de Python, libmpv, ffmpeg, mediainfo e exiftool instalados no sistema.
+- Rodando do código-fonte, depende de Python, libmpv, ffmpeg, mediainfo e exiftool do sistema (o pacote vai levar tudo; ver seção 5).
 - Zoom/arraste do vídeo ainda não validado com mouse real.
 - Wayland ainda não testado numa sessão Wayland real.
 
@@ -61,7 +61,9 @@ Claude (Code/Desktop) ──stdio/MCP──> claude-player-mcp ──socket Unix
 - [x] Renomear pacote/comandos para `ai-editor` / `ai-editor-mcp`.
 - [x] Modo dev: instância separada (`ai-editor-dev`) com recarga automática ao salvar código.
 - [x] Trocar o embutimento por `wid` pela **render API do libmpv** num `QOpenGLWidget` (X11 + Wayland, mouse nativo do Qt). VAAPI com interop confirmado em X11.
-- [ ] Localizar binários primeiro dentro do pacote e depois no sistema (`ffmpeg`, `ffprobe`, `mediainfo`, `exiftool`, `libmpv`).
+- [x] Localizar binários: variável `AI_EDITOR_<NOME>` → pacote → sob demanda → sistema (`binarios.py`), com `ai-editor --diagnostico` e ferramenta MCP `diagnostico`.
+- [x] Lixeira própria no padrão freedesktop (`lixeira.py`), sem depender do `gio`.
+- [x] Modal de metadados (botão ⓘ / Ctrl+I) com copiar tudo.
 - [ ] Comando `ai-editor --instalar`: registra o MCP no Claude Code e no Claude Desktop, cria o `.desktop` e associa tipos MIME (opcional).
 - [ ] `--desinstalar` simétrico.
 
@@ -105,7 +107,45 @@ Fluxo: o Claude localiza o objeto nos quadros → segmenta e rastreia → mostra
 - **AppImage** só para testar o empacotamento e nas releases (`make appimage`); é um arquivo único, atualizar = trocar o arquivo.
 - **Git**: trabalho na `dev`; conjunto estável → merge na `main` + tag → GitHub Actions publica o AppImage.
 
-## 5. Licença e dependências
+## 5. Inventário de ferramentas
+
+Decidido em 2026-11-09. Registro em `src/ai_editor/binarios.py` (`REGISTRO` e `RECURSOS_FFMPEG`).
+
+### 5.1 Embutido no pacote (offline desde o primeiro uso)
+| Ferramenta | Para quê | Licença | Tamanho aprox. |
+|---|---|---|---|
+| ffmpeg + ffprobe (estático) | edições, análise, exportação. Precisa de: libx264, libvpx-vp9, libopus, aac. Desejável: libx265, libsvtav1, libmp3lame, prores_ks, libass (`subtitles`), rubberband, arnndn | GPL | ~80 MB |
+| libmpv + dependências | reprodução com aceleração por hardware | GPL/LGPL | ~40 MB |
+| mediainfo | metadados detalhados | BSD-2 | ~10 MB |
+| exiftool | metadados de câmera/GPS/XMP; usa o Perl do sistema e leva um Perl mínimo se faltar | Artistic/GPL | ~25 MB |
+| c2patool | Content Credentials (procedência, "gerado por IA") | MIT/Apache-2.0 | ~20 MB |
+| modelo RNNoise | redução de ruído básica (`arnndn`) | BSD | < 1 MB |
+| Python + PySide6 (só módulos usados), python-mpv, numpy, qtawesome, mcp | o app | LGPL/MIT/BSD | ~120 MB |
+
+Meta: AppImage comprimido com ~150–200 MB.
+
+### 5.2 Sob demanda (baixado no primeiro uso, com confirmação e tamanho)
+Destino: `~/.local/share/ai-editor/bin` e `~/.local/share/ai-editor/modelos`.
+| Ferramenta | Para quê | Licença | Tamanho |
+|---|---|---|---|
+| ONNX Runtime (+ OpenVINO opcional) | motor das IAs no processador | MIT | ~50 MB |
+| SAM 2.1 tiny | recortar/rastrear objetos (Fase 3) | Apache-2.0 | ~150 MB |
+| LaMa | preencher fundo removido (Fase 3) | Apache-2.0 | ~200 MB |
+| whisper.cpp (`whisper-cli`) + modelo base/small | legendas/transcrição (Fase 4) — ou o filtro `whisper` do ffmpeg 8, se o build tiver | MIT | 5 MB + 150–470 MB |
+| DeepFilterNet | redução de ruído de alta qualidade | MIT/Apache-2.0 | ~10 MB |
+| Demucs (opcional) | separar voz e música | MIT | ~300 MB |
+
+### 5.3 Eliminados
+- `gio trash` → `lixeira.py` (padrão freedesktop, inclusive lixeira de outros discos).
+- `xdg-mime` → `--instalar` escreve `mimeapps.list` direto (usa `xdg-mime` só se existir).
+
+### 5.4 Só para construir
+PyInstaller ou Nuitka, linuxdeploy, appimagetool, GitHub Actions.
+
+### 5.5 A confirmar
+- Se os builds estáticos do ffmpeg 8 trazem o filtro `whisper` (dispensaria o whisper.cpp).
+
+## 6. Licença e dependências
 
 Projeto: **GPL-3.0**.
 
@@ -121,12 +161,13 @@ Projeto: **GPL-3.0**.
 | LaMa | Apache-2.0 | ok com GPL-3.0 |
 | ProPainter | NTU S-Lab 1.0 (não comercial) | **evitar no pacote**; no máximo opcional |
 
-## 6. Decisões
+## 7. Decisões
 - 2026-11-09: foco inicial só em Linux; distribuição por AppImage.
 - 2026-11-09: licença GPL-3.0.
 - 2026-11-09: nome do pacote/comando `ai-editor`; app "AI Editor".
+- 2026-11-09: inventário de ferramentas aprovado (seção 5).
 - 2026-11-09: IAs rodam localmente em CPU (sem LLM extra); o Claude faz o papel de "cérebro" via MCP.
 
-## 7. Questões em aberto
+## 8. Questões em aberto
 - Manter o idioma da interface em português ou adicionar i18n desde já?
 - Associar o app como player padrão de mídia na instalação ou deixar opcional?

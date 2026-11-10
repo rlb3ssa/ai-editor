@@ -230,6 +230,14 @@ async def analisar_audio(faixa: int = 1, inicio: str | None = None, fim: str | N
                      limiar_silencio_db, silencio_min_s)
 
 
+@ferramenta
+async def diagnostico() -> dict:
+    """Ferramentas externas encontradas (ffmpeg, mediainfo, exiftool, libmpv, c2patool...), de onde vieram
+    (pacote, sob demanda ou sistema), versões e recursos do ffmpeg disponíveis. Use quando algo falhar."""
+    from . import binarios
+    return binarios.diagnostico()
+
+
 # ---------------------------------------------------------------- edição
 @ferramenta
 async def cortar(inicio: str = "in", fim: str = "out", preciso: bool = True) -> dict:

@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QFileDialog, QFrame, QHB
 
 import qtawesome as qta
 
-from . import cliente
+from . import binarios, cliente
 from . import info as _info
 from .core import CACHE_DIR, DEV, FONTE_DIR, NOME, RUNTIME_DIR, SOCKET_PATH, TITULO, Documento, fmt_tempo, parse_tempo
 from .ondas import PICOS_POR_SEG, picos
@@ -738,6 +738,7 @@ class Janela(QMainWindow):
         self.statusBar().showMessage("Arraste um arquivo para cá ou use Ctrl+O · roda no vídeo/régua = zoom · arrastar = mover · I = marcar ponto · botão direito na régua = marcas")
 
         # mpv
+        binarios.preparar_libmpv()  # usa a libmpv do pacote, se houver
         import mpv  # import tardio: precisa do locale numérico C
         global _mpv
         _mpv = mpv
@@ -1398,6 +1399,8 @@ def _tema(app: QApplication):
 
 
 def main():
+    if "--diagnostico" in sys.argv[1:]:
+        sys.exit(binarios.imprimir_diagnostico())
     args = [a for a in sys.argv[1:] if not a.startswith("-")]
     # Já existe uma janela? Encaminha o arquivo para ela.
     if cliente.vivo():

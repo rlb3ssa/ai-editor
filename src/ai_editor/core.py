@@ -15,6 +15,9 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from . import binarios
+from .lixeira import mover_para_lixeira
+
 # ---------------------------------------------------------------- caminhos
 # Modo desenvolvimento: rodando do código-fonte (não empacotado). Pode ser forçado com AI_EDITOR_DEV=0/1.
 # A instância dev usa outro nome/socket, para conviver com a versão instalada.
@@ -27,16 +30,13 @@ FONTE_DIR = Path(__file__).resolve().parent
 RUNTIME_DIR = Path(os.environ.get("XDG_RUNTIME_DIR", tempfile.gettempdir())) / NOME
 SOCKET_PATH = RUNTIME_DIR / "controle.sock"
 CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "ai-editor"
-LOCAL_BIN = Path.home() / ".local" / "bin"
 
 
 def ferramenta(nome: str) -> str | None:
-    """Localiza um executável no PATH ou em ~/.local/bin."""
-    p = shutil.which(nome)
-    if p:
-        return p
-    cand = LOCAL_BIN / nome
-    return str(cand) if cand.exists() else None
+    """Caminho de uma ferramenta externa (pacote → sob demanda → sistema). Ver binarios.py."""
+    if nome in binarios.REGISTRO:
+        return binarios.localizar(nome)
+    return shutil.which(nome)
 
 
 # ---------------------------------------------------------------- tempo
@@ -105,7 +105,8 @@ def parse_tempo(valor, estado: dict | None = None) -> float:
 
 
 # ---------------------------------------------------------------- execução
-FFMPEG = ["ffmpeg", "-hide_banner", "-nostdin", "-y", "-loglevel", "error"]
+FFMPEG = [binarios.exe("ffmpeg"), "-hide_banner", "-nostdin", "-y", "-loglevel", "error"]
+FFPROBE = binarios.exe("ffprobe")
 
 
 class ErroFFmpeg(RuntimeError):
@@ -120,7 +121,7 @@ def rodar(cmd: list[str], timeout: float | None = None) -> subprocess.CompletedP
 
 
 def ffprobe(path: Path | str) -> dict:
-    r = rodar(["ffprobe", "-v", "error", "-print_format", "json", "-show_format",
+    r = rodar([FFPROBE, "-v", "error", "-print_format", "json", "-show_format",
                "-show_streams", "-show_chapters", str(path)])
     return json.loads(r.stdout)
 
@@ -244,8 +245,8 @@ class Documento:
         final = self.pasta / vs[-1]["arquivo"]
         destino = self.original.with_suffix(final.suffix)
         if self.original.exists():
-            if lixeira and shutil.which("gio"):
-                subprocess.run(["gio", "trash", str(self.original)], check=True)
+            if lixeira:
+                mover_para_lixeira(self.original)
             else:
                 self.original.unlink()
         if destino.exists() and destino != self.original:
@@ -471,7 +472,7 @@ def extrair_quadro(arquivo: Path, t: float, largura: int, destino: Path) -> Path
 
 def analisar_audio(arquivo: Path, faixa: int, inicio: float | None, fim: float | None,
                    limiar_silencio_db: float = -40, silencio_min: float = 0.5) -> dict:
-    cmd = ["ffmpeg", "-hide_banner", "-nostdin"]
+    cmd = [FFMPEG[0], "-hide_banner", "-nostdin"]
     if inicio:
         cmd += ["-ss", f"{inicio:.3f}"]
     cmd += ["-i", str(arquivo)]
@@ -626,7 +627,7 @@ def metadados(arquivo: Path | str, profundo: bool = False, hash_: bool = False) 
     if hash_:
         rel["sistema_de_arquivos"]["sha256"] = _sha256(p)
 
-    rel["ffprobe"] = _rodar_json(["ffprobe", "-v", "error", "-print_format", "json",
+    rel["ffprobe"] = _rodar_json([FFPROBE, "-v", "error", "-print_format", "json",
                                   "-show_format", "-show_streams", "-show_chapters",
                                   "-show_programs", "-show_private_data", str(p)])
     if ferramenta("mediainfo"):

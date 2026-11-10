@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
+from . import binarios
 from .core import CACHE_DIR
 
 PICOS_POR_SEG = 200      # resolução: 5 ms por pico
@@ -25,7 +26,7 @@ def picos(arquivo: Path | str, faixa: int) -> np.ndarray:
     cache = _chave(arquivo, faixa)
     if cache.exists():
         return np.load(cache)
-    cmd = ["ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "error", "-i", str(arquivo),
+    cmd = [binarios.exe("ffmpeg"), "-hide_banner", "-nostdin", "-loglevel", "error", "-i", str(arquivo),
            "-map", f"0:a:{faixa}", "-ac", "1", "-ar", str(TAXA), "-f", "s16le", "-"]
     bloco = TAXA // PICOS_POR_SEG
     out = []

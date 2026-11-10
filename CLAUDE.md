@@ -14,6 +14,9 @@ O spec, o roadmap e as decisões ficam em **`plano.md`** — leia antes de come�
 | `src/ai_editor/app.py` | Janela PySide6 + libmpv: vídeo, controles, régua, ondas por faixa, mix, servidor de controle por socket |
 | `src/ai_editor/core.py` | Núcleo sem Qt: caminhos/modo dev, tempos, ffmpeg, versões (`Documento`), cortes, áudio, metadados |
 | `src/ai_editor/ondas.py` | Picos de áudio com cache |
+| `src/ai_editor/binarios.py` | Localiza ferramentas externas (env → pacote → sob demanda → sistema), diagnóstico |
+| `src/ai_editor/lixeira.py` | Lixeira freedesktop (usada no `salvar`) |
+| `src/ai_editor/info.py` | Modal de metadados (glassmorphism) |
 | `src/ai_editor/cliente.py` | Cliente do socket da janela |
 | `src/ai_editor/mcp_server.py` | Servidor MCP (stdio); fala com a janela pelo socket |
 
@@ -41,6 +44,13 @@ e aparece na barra de status. Erros em tempo de execução: ver o log (stderr do
 Comandos úteis: `estado`, `depurar` (props do mpv; `extras=[...]`), `capturar` (print da janela via Qt, inclusive o vídeo, mesmo com a janela atrás de outras →
 `$XDG_RUNTIME_DIR/ai-editor-dev/captura.png`), `abrir`, `pausar`, `pular`,
 `marcar`, `zoom_video`, `editar_tempo` (com `valor`, vai ao tempo), `recarregar`, `sair`.
+
+## Ferramentas externas
+- **Nunca** chame `ffmpeg`/`ffprobe`/`mediainfo`/`exiftool` pelo nome solto: use `binarios.exe(nome)`,
+  `binarios.caminho(nome)` (erro com dica de instalação) ou `core.FFMPEG`/`core.FFPROBE`.
+- Ferramenta nova → registrar em `binarios.REGISTRO` (e recursos do ffmpeg em `RECURSOS_FFMPEG`) e na
+  seção 5 do `plano.md`, com licença compatível com GPL-3.0.
+- `ai-editor --diagnostico` (ou a ferramenta MCP `diagnostico`) mostra o que foi encontrado e o que falta.
 
 ## Regras importantes
 - **Nunca** use `pkill -f ai-editor`/`claude-player` nem `kill` por padrão de nome: mata o servidor MCP e o
