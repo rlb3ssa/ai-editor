@@ -19,9 +19,12 @@ O spec, o roadmap e as decisões ficam em **`plano.md`** — leia antes de come�
 | `src/ai_editor/info.py` | Modal de metadados (glassmorphism) |
 | `src/ai_editor/exportacao.py` | Painel de exportação (mesmo vidro); roda `core.exportar` em `QThreadPool` |
 | `src/ai_editor/cliente.py` | Cliente do socket da janela |
+| `src/ai_editor/cli.py` | Ponto de entrada `ai-editor` (`--mcp`, `--diagnostico`, `--instalar`, `--desinstalar`, `--versao`; senão abre a janela) |
+| `src/ai_editor/instalador.py` | `--instalar`/`--desinstalar`: atalho, `.desktop`, MIME, registro MCP no Claude Code/Desktop, transacional com manifesto e `.ai-editor.bak` |
 | `src/ai_editor/fala.py` | Fala/legendas (Fase 6, sem Qt): whisper.cpp sob demanda, modelos com SHA-256, transcrição com cache, .srt/.vtt, gravar/embutir legenda, `buscar_fala` |
 | `src/ai_editor/mcp_server.py` | Servidor MCP (stdio); fala com a janela pelo socket |
 | `src/ai_editor/objetos.py` | Fase 7, sem Qt: IA local sob demanda (ONNX Runtime opcional, extra `ia`) — SAM 2.1 segmenta/rastreia, LaMa remove; máscaras, fundo, recorte com alfa, tarefas em segundo plano |
+| `packaging/` | AppImage (`build_appimage.sh`, `SHA256SUMS` dos downloads fixados), bundle `.mcpb`, licenças de terceiros |
 
 Fluxo: Claude → MCP (`ai-editor-mcp`) → socket Unix JSON-lines (`{"cmd":..., ...}` → `{"ok", "dados"|"erro"}`) → janela.
 Edições pesadas (ffmpeg) rodam no processo do MCP via `core.py`; depois o MCP manda `recarregar` para a janela.

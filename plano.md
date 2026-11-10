@@ -612,7 +612,8 @@ Decidido em 2026-11-09. Registro em `src/ai_editor/binarios.py` (`REGISTRO` e `R
 | mediainfo | metadados detalhados | BSD-2 | ~10 MB |
 | exiftool | metadados de câmera/GPS/XMP; usa o Perl do sistema (o pacote não leva Perl) | Artistic/GPL | ~21 MB |
 | c2patool | Content Credentials (procedência, "gerado por IA") | MIT/Apache-2.0 | ~20 MB |
-| modelo RNNoise | redução de ruído básica (`arnndn`) — ainda não incluído (entra com a Fase 4) | BSD | < 1 MB |
+| filtros do ffmpeg usados: `drawtext` (libfreetype/fontconfig/harfbuzz), `vidstabdetect/transform` (vid.stab), `subtitles` (libass), `arnndn` | texto, estabilização, legendas, ruído | vid.stab GPL-2.0+, freetype FTL/GPL-2.0, libass ISC — todos compatíveis | (no ffmpeg) |
+| modelo RNNoise | `reduzir_ruido(metodo='rnnoise')` — ponto de extensão; ainda não embutido (o código usa o primeiro `~/.local/share/ai-editor/modelos/rnnoise/*.rnnn`) | BSD | < 1 MB |
 | Python + PySide6 (só módulos usados), python-mpv, numpy, qtawesome, mcp | o app | LGPL/MIT/BSD | ~120 MB |
 
 Meta: AppImage comprimido com ~150–250 MB. Obtido: **233 MB** (164 MB com `FFMPEG_ORIGEM=sistema`).

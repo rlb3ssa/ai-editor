@@ -17,8 +17,11 @@ from mcp.server.mcpserver.exceptions import ToolError
 from . import cliente, core
 from .core import NOME, Documento, fmt_tempo, parse_tempo
 
+from .cli import versao as _versao
+
 mcp = MCPServer(
     NOME,
+    version=_versao(),
     log_level="WARNING",
     instructions=(
         "Controla a janela de vídeo do usuário (AI Editor) e edita com ffmpeg.\n"
