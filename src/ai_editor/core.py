@@ -551,7 +551,10 @@ def cadeia_audio(ganho_db=None, normalizar=False, reduzir_ruido=False, silenciar
         b = fim if fim is not None else dur
         janela = f":enable='between(t,{a:.3f},{b:.3f})'"
     if reduzir_ruido:
-        filtros.append("afftdn=nf=-25")
+        # {LAT}/{ST}: preenchidos por faixa em aplicar_filtro_audio (atraso do afftdn ~25 ms e início da faixa);
+        # sem compensar, o áudio ficava 25 ms atrasado em relação ao vídeo e perdia esse tanto do fim
+        filtros.append("asetpts=PTS-STARTPTS,apad=pad_dur={LAT},afftdn=nf=-25,atrim=start={LAT},"
+                       "asetpts=PTS-STARTPTS+{ST}/TB")
     if normalizar:
         filtros.append("loudnorm=I=-16:TP=-1.5:LRA=11,aresample=48000")
     if ganho_db:
@@ -580,7 +583,18 @@ def aplicar_filtro_audio(doc: Documento, faixas: list[int], cadeia: str, descric
         if not 0 <= f < n:
             raise ValueError(f"faixa {f + 1} não existe (há {n})")
     saida = doc.proxima_saida()
-    grafo = ";".join(f"[0:a:{f}]{cadeia}[a{f}]" for f in faixas)
+    if "{LAT}" in cadeia or "{ST}" in cadeia:
+        info = _info_audio(entrada)
+        partes = []
+        for f in faixas:
+            s = info["auds"][f]
+            st, _ = _extensao_faixa(info, s)
+            lat = latencia_filtro("afftdn=nr=10:nf=-50", int(s.get("sample_rate") or 48000))
+            partes.append(f"[0:a:{f}]" + cadeia.replace("{LAT}", f"{lat:.6f}").replace("{ST}", f"{st:.6f}")
+                          + f"[a{f}]")
+        grafo = ";".join(partes)
+    else:
+        grafo = ";".join(f"[0:a:{f}]{cadeia}[a{f}]" for f in faixas)
     cmd = FFMPEG + ["-i", str(entrada), "-filter_complex", grafo, "-map", "0:V?"]
     for i in range(n):
         cmd += ["-map", f"[a{i}]" if i in faixas else f"0:a:{i}"]
@@ -2798,7 +2812,9 @@ def latencia_filtro(filtro: str, sr: int) -> float:
     if r.returncode != 0 or len(x) <= n0:
         return 0.0
     pico = max(range(len(x)), key=lambda i: abs(x[i]))
-    if abs(x[pico]) < 0.1:  # o filtro engoliu o clique (ex.: arnndn): sem medida confiável
+    # o filtro engoliu o clique (ex.: arnndn): sem medida confiável. Limite baixo de propósito: o afftdn com
+    # nf ≥ -30 dB atenua o clique para ~0,09 (o ruído de fundo do teste fica em ~0,0005)
+    if abs(x[pico]) < 0.02:
         return 0.0
     return max(0, pico - n0) / sr
 
@@ -2983,8 +2999,8 @@ def reduzir_ruido(doc: Documento, metodo: str = "afftdn", intensidade="media", f
     metodo 'rnnoise' (arnndn, rede neural para voz): precisa de um modelo .rnnn em
       ~/.local/share/ai-editor/modelos/rnnoise/ (não é baixado automaticamente).
     metodo 'deepfilternet' (rede neural DeepFilterNet 3, melhor para voz com ruído variado: trânsito,
-      teclado, eco, vento): baixado no primeiro uso (~36 MB, `deepfilter.py`); ~10–30× mais rápido que o
-      tempo real na CPU. A intensidade vira o limite de atenuação (leve 12 dB, media 24 dB, forte = sem limite).
+      teclado, eco, vento): baixado no primeiro uso (~36 MB, `deepfilter.py`); ~3× o tempo real por núcleo,
+      blocos em paralelo. A intensidade vira o limite de atenuação (leve 12 dB, media 24 dB, forte = sem limite).
     intensidade: 'leve' (10 dB), 'media' (20 dB), 'forte' (32 dB) ou dB de redução (3–60).
     inicio/fim: aplica só nesse trecho (o resto fica igual). piso_ruido_db: força o nível do ruído (dBFS RMS).
     Sincronia: o atraso do filtro (afftdn 25 ms, anlmdn 8 ms; `latencia_filtro`) é compensado (silêncio desse
@@ -3046,7 +3062,9 @@ def reduzir_ruido(doc: Documento, metodo: str = "afftdn", intensidade="media", f
             detalhes["perfil_ruido"] = f"amostrado em {fmt_tempo(ra)}→{fmt_tempo(rb)}"
         else:
             meio = f"{filtro}{enable(-st)}"
-        lat = latencia_filtro(filtro, sr)
+        # o atraso do afftdn não depende de nr/nf: mede com parâmetros neutros (com nf alto o clique de teste
+        # era atenuado e a medida falhava → 0 ms → áudio 25 ms atrasado em relação ao vídeo)
+        lat = latencia_filtro("afftdn=nr=10:nf=-50", sr)
         desc = f"reduziu ruído A{k + 1} (afftdn, {nr:g} dB; ruído {ruido:.0f} dB {med['origem']})"
     elif metodo == "anlmdn":
         forca = min(1000.0, 10 ** (nr / 10 - 1))  # leve 1, media 10, forte ~160

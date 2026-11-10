@@ -35,6 +35,62 @@ def _base_pacote() -> Path | None:
     return None
 
 
+# ---------------------------------------------------------------- modelos de IA (embutidos ou do usuário)
+# No AppImage os modelos vêm DENTRO do pacote, em usr/share/ai-editor/modelos/<subpasta>/<arquivo> (mesma estrutura de
+# ~/.local/share/ai-editor/modelos), somente leitura e já conferidos (SHA-256) no build. A busca olha o pacote PRIMEIRO
+# e depois a pasta do usuário. Empacotado, nada é baixado (downloads_permitidos() = False).
+def pasta_modelos_pacote() -> Path | None:
+    base = _base_pacote()
+    if base is None:
+        return None
+    for p in (base / "share" / "ai-editor" / "modelos",                     # AppImage ($APPDIR/usr)
+              Path(sys.executable).resolve().parent.parent / "share" / "ai-editor" / "modelos"):  # PyInstaller
+        if p.is_dir():
+            return p
+    return None
+
+
+def pastas_modelos() -> list[Path]:
+    """Onde procurar modelos, em ordem: o pacote (se houver) e a pasta do usuário."""
+    pac = pasta_modelos_pacote()
+    return ([pac] if pac else []) + [MODELOS_DIR]
+
+
+def caminho_modelo(*partes: str) -> Path:
+    """Primeiro `<pasta>/<partes...>` que existe (pacote antes do usuário); se nenhum, o caminho na pasta do usuário
+    (onde um download, quando permitido, gravaria)."""
+    for d in pastas_modelos():
+        p = d.joinpath(*partes)
+        if p.exists():
+            return p
+    return MODELOS_DIR.joinpath(*partes)
+
+
+def modelo_embutido(p: Path) -> bool:
+    """True se o arquivo/pasta é do pacote (somente leitura, conferido no build: basta conferir o tamanho)."""
+    pac = pasta_modelos_pacote()
+    return bool(pac) and Path(p).is_relative_to(pac)
+
+
+def downloads_permitidos() -> bool:
+    """Do código-fonte, modelos e ferramentas faltando são baixados sob demanda. Empacotado (AppImage), nunca:
+    tudo o que o app usa já vem dentro (AI_EDITOR_PERMITIR_DOWNLOADS=1 reabilita, para testes)."""
+    return _base_pacote() is None or os.environ.get("AI_EDITOR_PERMITIR_DOWNLOADS") == "1"
+
+
+def modelos_embutidos() -> list[dict]:
+    """Modelos dentro do pacote: subpasta, arquivos e tamanho (para o diagnóstico)."""
+    pac = pasta_modelos_pacote()
+    if not pac:
+        return []
+    r = []
+    for d in sorted(x for x in pac.iterdir() if x.is_dir()):
+        arqs = [f for f in d.iterdir() if f.is_file() and not f.name.startswith(".") and f.name != "ORIGEM.txt"]
+        r.append({"modelo": d.name, "arquivos": sorted(f.name for f in arqs),
+                  "tamanho_mb": round(sum(f.stat().st_size for f in arqs) / 1e6, 1), "caminho": str(d)})
+    return r
+
+
 class FerramentaAusente(RuntimeError):
     pass
 
@@ -106,7 +162,103 @@ RECURSOS_FFMPEG = [
     ("filters", "idet", False, "relatorio_tecnico: detectar entrelaçamento"),
     ("filters", "blockdetect", False, "relatorio_tecnico: blocagem estimada (ffmpeg 5.1+)"),
     ("filters", "ebur128", False, "loudness (LUFS) e pico verdadeiro"),
+    ("filters", "afftfilt", False, "efeitos de áudio (mcp_audio)"),
+    ("filters", "afir", False, "efeitos de áudio (mcp_audio)"),
+    ("filters", "aecho", False, "efeitos de áudio (mcp_audio)"),
+    ("filters", "speechnorm", False, "efeitos de áudio (mcp_audio)"),
+    ("filters", "dynaudnorm", False, "efeitos de áudio (mcp_audio)"),
+    ("filters", "deesser", False, "efeitos de áudio (mcp_audio)"),
+    ("filters", "agate", False, "efeitos de áudio (mcp_audio)"),
+    ("filters", "adeclick", False, "efeitos de áudio (mcp_audio)"),
+    ("filters", "adeclip", False, "efeitos de áudio (mcp_audio)"),
+    ("filters", "extrastereo", False, "efeitos de áudio (mcp_audio)"),
+    ("filters", "dialoguenhance", False, "efeitos de áudio (mcp_audio)"),
+    ("filters", "areverse", False, "efeitos de áudio (mcp_audio)"),
+    ("filters", "loudnorm", False, "efeitos de áudio (mcp_audio)"),
+    ("filters", "alimiter", False, "efeitos de áudio (mcp_audio)"),
+    ("filters", "acompressor", False, "efeitos de áudio (mcp_audio)"),
+    ("filters", "chorus", False, "efeitos de áudio (mcp_audio)"),
+    ("filters", "vibrato", False, "efeitos de áudio (mcp_audio)"),
+    ("filters", "pan", False, "efeitos de áudio (mcp_audio)"),
+    ("filters", "aevalsrc", False, "efeitos de áudio (mcp_audio)"),
+    ("filters", "sine", False, "efeitos de áudio (mcp_audio)"),
+    ("filters", "acrusher", False, "efeitos de áudio (mcp_audio)"),
+    ("filters", "asoftclip", False, "efeitos de áudio (mcp_audio)"),
+    ("filters", "libvmaf", False, "comparar_qualidade (VMAF; sem ele usa SSIM/PSNR)"),
+    ("filters", "ssim", False, "arquivos e imagens (mcp_arquivos)"),
+    ("filters", "psnr", False, "arquivos e imagens (mcp_arquivos)"),
+    ("filters", "tile", False, "arquivos e imagens (mcp_arquivos)"),
+    ("filters", "zoompan", False, "arquivos e imagens (mcp_arquivos)"),
+    ("filters", "showwaves", False, "arquivos e imagens (mcp_arquivos)"),
+    ("filters", "showspectrum", False, "arquivos e imagens (mcp_arquivos)"),
+    ("filters", "showfreqs", False, "arquivos e imagens (mcp_arquivos)"),
+    ("filters", "showcqt", False, "arquivos e imagens (mcp_arquivos)"),
+    ("filters", "select", False, "arquivos e imagens (mcp_arquivos)"),
+    ("filters", "metadata", False, "arquivos e imagens (mcp_arquivos)"),
+    ("encoders", "libwebp", False, "extrair_quadros em WebP"),
+    ("filters", "perspective", False, "efeitos de vídeo (mcp_video)"),
+    ("filters", "chromakey", False, "efeitos de vídeo (mcp_video)"),
+    ("filters", "despill", False, "efeitos de vídeo (mcp_video)"),
+    ("filters", "lut3d", False, "efeitos de vídeo (mcp_video)"),
+    ("filters", "haldclut", False, "efeitos de vídeo (mcp_video)"),
+    ("filters", "minterpolate", False, "efeitos de vídeo (mcp_video)"),
+    ("filters", "framerate", False, "efeitos de vídeo (mcp_video)"),
+    ("filters", "pixelize", False, "efeitos de vídeo (mcp_video)"),
+    ("filters", "cas", False, "efeitos de vídeo (mcp_video)"),
+    ("filters", "xstack", False, "efeitos de vídeo (mcp_video)"),
+    ("filters", "hstack", False, "efeitos de vídeo (mcp_video)"),
+    ("filters", "vstack", False, "efeitos de vídeo (mcp_video)"),
+    ("filters", "v360", False, "efeitos de vídeo (mcp_video)"),
+    ("filters", "delogo", False, "efeitos de vídeo (mcp_video)"),
+    ("filters", "cropdetect", False, "efeitos de vídeo (mcp_video)"),
+    ("filters", "bwdif", False, "efeitos de vídeo (mcp_video)"),
+    ("filters", "deflicker", False, "efeitos de vídeo (mcp_video)"),
+    ("filters", "hqdn3d", False, "efeitos de vídeo (mcp_video)"),
+    ("filters", "nlmeans", False, "efeitos de vídeo (mcp_video)"),
+    ("filters", "xbr", False, "efeitos de vídeo (mcp_video)"),
+    ("filters", "erosion", False, "efeitos de vídeo (mcp_video)"),
+    ("filters", "edgedetect", False, "efeitos de vídeo (mcp_video)"),
+    ("filters", "blend", False, "efeitos de vídeo (mcp_video)"),
+    ("filters", "geq", False, "efeitos de vídeo (mcp_video)"),
+    ("filters", "gblur", False, "efeitos de vídeo (mcp_video)"),
+    ("filters", "unsharp", False, "efeitos de vídeo (mcp_video)"),
+    ("filters", "noise", False, "efeitos de vídeo (mcp_video)"),
+    ("filters", "drawbox", False, "efeitos de vídeo (mcp_video)"),
+    ("filters", "reverse", False, "efeitos de vídeo (mcp_video)"),
+    ("filters", "loop", False, "efeitos de vídeo (mcp_video)"),
+    ("filters", "aloop", False, "efeitos de vídeo (mcp_video)"),
+    ("filters", "amix", False, "efeitos de vídeo (mcp_video)"),
+    ("filters", "tpad", False, "efeitos de vídeo (mcp_video)"),
+    ("filters", "apad", False, "efeitos de vídeo (mcp_video)"),
+    ("encoders", "ffv1", False, "intermediários sem perda de inverter/repetir"),
+    ("encoders", "flac", False, "intermediários sem perda de inverter/repetir"),
 ]
+
+
+# Módulos Python opcionais (motores de IA). No AppImage vêm embutidos; do código-fonte, pelo extra `ia`.
+# (módulo, para quê, licença, dica)
+MODULOS_PY = [
+    ("onnxruntime", "objetos com IA: segmentar, remover e recortar objeto (SAM 2.1, LaMa)", "MIT",
+     "uv sync --extra ia (código-fonte) ou pip install onnxruntime"),
+]
+
+
+def modulos_python() -> list[dict]:
+    """Importa de verdade cada módulo opcional (é o teste de que ele funciona aqui) e diz versão e origem."""
+    import importlib
+    itens = []
+    for nome, para_que, licenca, dica in MODULOS_PY:
+        i = {"modulo": nome, "para_que": para_que, "licenca": licenca, "encontrado": False, "versao": None,
+             "origem": None, "erro": None, "dica": None}
+        try:
+            m = importlib.import_module(nome)
+            i.update(encontrado=True, versao=getattr(m, "__version__", "?"),
+                     origem="pacote" if getattr(sys, "frozen", False) else "ambiente Python")
+        except Exception as e:  # noqa: BLE001 — ImportError ou falha ao carregar a biblioteca nativa
+            i["erro"] = f"{type(e).__name__}: {e}"
+            i["dica"] = None if getattr(sys, "frozen", False) else dica
+        itens.append(i)
+    return itens
 
 
 def _candidatos(f: Ferramenta) -> list[tuple[str, Path]]:
@@ -223,7 +375,7 @@ def diagnostico() -> dict:
     faltando = [i["ferramenta"] for i in itens if i["obrigatoria"] and not i["encontrada"]]
     faltando += [f"ffmpeg:{r['recurso']}" for r in rec if r["obrigatorio"] and not r["ok"]]
     return {"pacote": str(_base_pacote()) if _base_pacote() else None, "ferramentas": itens,
-            "recursos_ffmpeg": rec, "ok": not faltando, "faltando": faltando}
+            "modulos_python": modulos_python(), "modelos_embutidos": modelos_embutidos(), "recursos_ffmpeg": rec, "ok": not faltando, "faltando": faltando}
 
 
 def imprimir_diagnostico() -> int:
@@ -238,6 +390,21 @@ def imprimir_diagnostico() -> int:
             if i["dica"]:
                 s += f" — {i['dica']}"
         print(s)
+    print("\n  módulos Python (IA):")
+    for m in d["modulos_python"]:
+        if m["encontrado"]:
+            print(f"    ✔ {m['modulo']:<12} {m['versao']:<14} [{m['origem']}] {m['para_que']}")
+        else:
+            s = f"    · {m['modulo']:<12} ausente (opcional) — {m['erro']}"
+            if m["dica"]:
+                s += f" — {m['dica']}"
+            print(s)
+    if d["pacote"]:
+        print("\n  modelos de IA embutidos (nada é baixado):")
+        for m in d["modelos_embutidos"]:
+            print(f"    ✔ {m['modelo']:<22} {m['tamanho_mb']:>7.1f} MB  {', '.join(m['arquivos'])}")
+        if not d["modelos_embutidos"]:
+            print("    · nenhum")
     print("\n  recursos do ffmpeg:")
     for r in d["recursos_ffmpeg"]:
         marca = "✔" if r["ok"] else ("✘" if r["obrigatorio"] else "·")

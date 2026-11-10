@@ -151,7 +151,8 @@ async def estado() -> dict:
 
 @ferramenta
 async def controlar(acao: str, valor: str | None = None) -> dict:
-    """Controla a reprodução.
+    """Controla a reprodução: tocar, pausar, pular para um tempo, andar quadro a quadro, velocidade, zoom na régua
+    e mensagem na barra de status.
     acao: 'tocar' | 'pausar' | 'alternar' | 'pular' (valor=tempo) | 'quadros' (valor=n, pode ser negativo)
           | 'velocidade' (valor=0.25..4) | 'zoom' (valor='inicio-fim', ex. '1:00-1:05'; mostra esse trecho na régua)
           | 'mensagem' (valor=texto na barra de status) | 'mostrar' (traz a janela para frente)."""
@@ -293,7 +294,7 @@ async def cortar(inicio: str | float = "in", fim: str | float = "out", preciso: 
 
 @ferramenta
 async def remover_trechos(trechos: list[list[str | float]], preciso: bool = True) -> dict:
-    """Remove um ou mais trechos e junta o resto. trechos: [[inicio, fim], ...],
+    """Remove um ou mais trechos (corte exato no quadro) e junta o resto. trechos: [[inicio, fim], ...],
     ex. [["m1","m2"],["m3","m4"]] ou [["0:10","0:12.5"],["1:00","1:03"]]."""
     doc, est = _doc()
     dur = core.duracao(core.ffprobe(doc.atual()))
@@ -321,7 +322,8 @@ async def ajustar_audio(faixas: list[int] | None = None, ganho_db: float | None 
                         normalizar: bool = False, reduzir_ruido: bool = False, silenciar: bool = False,
                         fade_in_s: float | None = None, fade_out_s: float | None = None,
                         inicio: str | float | None = None, fim: str | float | None = None) -> dict:
-    """Altera o áudio no ARQUIVO (cria nova versão). faixas: [1], [2], [1,2]... (padrão: todas).
+    """Ajustes simples de áudio no ARQUIVO (nova versão): volume (ganho), normalizar, silenciar, fade e redução
+    de ruído rápida. faixas: [1], [2], [1,2]... (padrão: todas).
     ganho_db (+/-), silenciar e fades podem ser limitados a [inicio, fim];
     normalizar (EBU R128, -16 LUFS) e reduzir_ruido valem para a faixa inteira.
     Vídeo e faixas não citadas são copiados sem perda."""
@@ -356,7 +358,8 @@ async def ajustar_audio(faixas: list[int] | None = None, ganho_db: float | None 
 async def faixa_audio(acao: str, faixa: int | None = None, arquivo: str | None = None,
                       idioma: str | None = None, titulo: str | None = None, atraso_s: float = 0.0,
                       formato: str = "wav", inicio: str | float | None = None, fim: str | float | None = None) -> dict:
-    """Gerencia faixas de áudio.
+    """Gerencia faixas de áudio: remover uma faixa, adicionar um áudio externo como faixa nova (ex.: dublagem) ou
+    extrair uma faixa para um arquivo de áudio.
     acao='remover' (faixa) — tira a faixa do vídeo (nova versão).
     acao='adicionar' (arquivo, idioma, titulo, atraso_s) — adiciona áudio externo como nova faixa (nova versão).
     acao='extrair' (faixa, formato wav/mp3/flac/m4a/opus, inicio/fim opcionais) — salva a faixa como
@@ -587,7 +590,8 @@ async def reduzir_ruido(metodo: str = "afftdn", intensidade: str | float = "medi
     metodo='rnnoise': rede neural para voz (arnndn); só funciona se houver um modelo .rnnn em
       ~/.local/share/ai-editor/modelos/rnnoise/ (senão dá erro explicando).
     metodo='deepfilternet': rede neural DeepFilterNet 3, a melhor para VOZ com ruído que muda (trânsito, vento,
-      teclado, gente ao fundo, eco de sala); roda local na CPU, ~10–30× mais rápida que o tempo real.
+      teclado, gente ao fundo, eco de sala); roda local na CPU (~3× o tempo real por núcleo, usa até 4 núcleos: 1 h de áudio ≈ 5–20 min; para
+      vídeos longos rode e avise que demora).
       Baixa ~36 MB no primeiro uso (avise o usuário). Não use em música (pode tratar instrumentos como ruído).
       intensidade aqui = limite de atenuação: 'leve' 12 dB, 'media' 24 dB, 'forte' sem limite, ou dB.
     intensidade: 'leve' (10 dB), 'media' (20 dB, padrão), 'forte' (32 dB) ou dB de redução (3–60).
@@ -950,13 +954,14 @@ def _avisos_fala(r: dict) -> dict:
 
 
 @ferramenta
-async def transcrever(idioma: str = "auto", modelo: str = "base", faixa: int = 1, inicio: str | float | None = None,
+async def transcrever(idioma: str = "auto", modelo: str | None = None, faixa: int = 1, inicio: str | float | None = None,
                       fim: str | float | None = None, palavras: bool = False, arquivo: str | None = None) -> dict:
     """Transcreve a FALA do vídeo aberto (versão atual) ou de `arquivo`, 100% local (whisper.cpp na CPU;
     nada vai para a internet). Devolve o texto e os segmentos com tempo (segundos do arquivo inteiro).
     idioma: 'auto' (detecta) ou 'pt', 'en', 'es'...; informar acelera e evita erro de detecção.
-    modelo: 'base' (padrão, 148 MB, bom em português), 'tiny' (78 MB, mais rápido, erra mais),
-      'small' (488 MB, mais preciso, ~3x mais lento), 'base-q5_1'/'small-q5_1' (versões compactadas).
+    modelo: deixe vazio (padrão = 'small', 488 MB, o melhor em português; é o que vem embutido no AppImage).
+      Rodando do código-fonte também existem 'base' (148 MB, ~3× mais rápido, erra mais), 'tiny' (78 MB) e
+      'base-q5_1'/'small-q5_1' (compactados); no AppImage só 'small' está disponível.
       O modelo é baixado sozinho no primeiro uso (a resposta avisa o tamanho).
     faixa: faixa de áudio (1 = A1). inicio/fim: só esse trecho ('m1', '1:20', 'atual'...).
     palavras=True: inclui cada palavra com tempo (para cortes finos).
@@ -983,7 +988,7 @@ async def transcrever(idioma: str = "auto", modelo: str = "base", faixa: int = 1
 
 
 @ferramenta
-async def gerar_legenda(formato: str = "srt", idioma: str = "auto", modelo: str = "base", faixa: int = 1,
+async def gerar_legenda(formato: str = "srt", idioma: str = "auto", modelo: str | None = None, faixa: int = 1,
                         destino: str | None = None, max_caracteres: int = 42, max_linhas: int = 2,
                         arquivo: str | None = None) -> dict:
     """Gera arquivo de LEGENDA (.srt e/ou .vtt) a partir da fala, ARQUIVO NOVO ao lado do vídeo
@@ -1008,7 +1013,7 @@ async def gerar_legenda(formato: str = "srt", idioma: str = "auto", modelo: str 
 
 
 @ferramenta
-async def gravar_legenda(legenda: str | None = None, idioma: str = "auto", modelo: str = "base", faixa: int = 1,
+async def gravar_legenda(legenda: str | None = None, idioma: str = "auto", modelo: str | None = None, faixa: int = 1,
                          tamanho: float | None = None, cor: str | None = None, contorno: float | None = None,
                          cor_contorno: str | None = None, posicao: str | None = None,
                          margem: float | None = None, caixa: bool | None = None, cor_caixa: str | None = None,
@@ -1039,7 +1044,7 @@ async def gravar_legenda(legenda: str | None = None, idioma: str = "auto", model
 
 
 @ferramenta
-async def embutir_legenda(legenda: str | None = None, idioma: str = "auto", modelo: str = "base", faixa: int = 1,
+async def embutir_legenda(legenda: str | None = None, idioma: str = "auto", modelo: str | None = None, faixa: int = 1,
                           titulo: str | None = None, padrao: bool = True) -> dict:
     """EMBUTE a legenda como FAIXA de legenda no arquivo (o espectador liga/desliga no player), sem
     re-encodar vídeo nem áudio (rápido, sem perda; nova versão). MP4/MOV → mov_text; MKV → SRT (ou ASS);
@@ -1059,7 +1064,7 @@ async def embutir_legenda(legenda: str | None = None, idioma: str = "auto", mode
 
 
 @ferramenta
-async def buscar_fala(texto: str, idioma: str = "auto", modelo: str = "base", faixa: int = 1,
+async def buscar_fala(texto: str, idioma: str = "auto", modelo: str | None = None, faixa: int = 1,
                       limiar: float = 0.75, margem_s: float = 0.1, marcar_na_regua: bool = False,
                       arquivo: str | None = None) -> dict:
     """EDIÇÃO PELO TEXTO: acha os momentos em que a frase `texto` é dita (busca aproximada: ignora acentos,
@@ -1256,9 +1261,13 @@ async def tarefas(id: str | None = None, acao: str = "estado") -> list | dict:
 
 @ferramenta
 async def objetos_ia(baixar: list[str] | None = None) -> dict:
-    """Situação da IA de objetos: ONNX Runtime instalado?, modelos baixados (e licenças), memória livre e as
-    máscaras do vídeo aberto. baixar=['sam2.1-tiny', 'lama'] baixa os modelos agora (em segundo plano)."""
+    """Situação da IA local: ONNX Runtime instalado?, modelos baixados (tamanho e licença), memória livre e as
+    máscaras do vídeo aberto. baixar=['sam2.1-tiny', 'lama'] baixa os modelos agora (em segundo plano).
+    Modelos de separação de áudio (`separar_audio`): 'htdemucs-ft-voz' (voz; todas as qualidades),
+    'htdemucs-ft-bateria'/'-baixo'/'-outros' (instrumentos, qualidade alta/máxima), 'htdemucs' (instrumentos,
+    rápida/máxima), 'htdemucs-6s' (guitarra/violão e piano)."""
     ob = _objetos()
+    from . import separar  # noqa: F401 — registra os modelos de separação de áudio em ob.MODELOS
     r = ob.disponivel()
     try:
         doc, _ = _doc()
@@ -1280,9 +1289,102 @@ async def objetos_ia(baixar: list[str] | None = None) -> dict:
     return r
 
 
+# ferramentas por tema em módulos próprios (registram-se no mesmo `mcp` ao serem importadas)
+from . import mcp_arquivos, mcp_audio, mcp_video  # noqa: E402,F401
+
+
+@ferramenta
+async def separar_audio(modo: str = "faixas", faixa: int = 1, inicio: str | float | None = None,
+                        fim: str | float | None = None, instrumentos: list[str] | None = None,
+                        qualidade: str = "alta", limpeza: str | None = None,
+                        limpeza_inicio: str | float | None = None, limpeza_fim: str | float | None = None,
+                        destino: str = "faixas", formato: str = "wav", fala: bool | None = None) -> list | dict:
+    """IA local (Demucs v4, sem internet depois de instalado): separa VOZ, MÚSICA e INSTRUMENTOS de uma faixa de áudio.
+    modo:
+    - 'faixas' (padrão): acrescenta 2 faixas novas — "Voz" e "Música (sem voz)" (voz + música = original); a
+      original fica intacta. Bom para remixar: abaixar a música, dar ganho na voz, mutar uma delas na janela.
+    - 'so_voz': a faixa passa a ter só a voz ("tira a música de fundo", "deixa só a voz").
+    - 'so_musica': tira a voz e deixa o acompanhamento ("faz um karaokê", "tira a voz").
+    - 'instrumentos': um áudio por instrumento. instrumentos=['voz','bateria','baixo','guitarra','piano','outros']
+      (qualquer subconjunto; 'violão' = 'guitarra'; ['todos'] = os 6). Padrão: voz, bateria, baixo, outros.
+      Guitarra/violão e piano usam o modelo de 6 fontes (um pouco pior nas outras).
+    destino (modos 'faixas' e 'instrumentos'): 'faixas' (faixas novas no documento, versão nova), 'arquivos'
+    (um arquivo por fonte ao lado do vídeo: <nome>.voz.wav, <nome>.bateria.wav...; nunca sobrescreve; não cria
+    versão) ou 'ambos'. formato dos arquivos: wav (padrão), flac, mp3, m4a, opus.
+    qualidade: 'rapida' (1 passada da rede, ~1× a duração com a máquina livre), 'alta' (padrão: 2 passadas, a 2ª
+    com a grade deslocada e os canais trocados; ~2–3× a duração; no modo instrumentos usa os 4 especialistas do
+    htdemucs_ft, ~4×), 'maxima' (4 passadas com sobreposição 50% + outro modelo no conjunto; ~7–14× a duração:
+    use em trechos ou quando pedirem o melhor possível). Medido: alta > rápida quando há vazamento (+1,3 dB);
+    máxima quase igual à alta.
+    fala: True quando a voz é FALA (narração, entrevista, vlog, aula) — a voz separada passa pelo DeepFilterNet
+    (IA de voz falada) e o instrumento que vaza na voz some quase todo (medido: vazamento −5 → −19 dB). Padrão:
+    True em 'so_voz', False nos outros modos. NÃO use em canto (pode cortar notas longas).
+    limpeza: 'nao' (padrão) | 'leve' | 'media' | 'forte' — filtro de Wiener com todas as fontes; ajuda pouco
+    (medido: tira vazamento já inaudível e piora a voz ~4 dB). Para vazamento em FALA use fala=True;
+    em canto, qualidade='alta'/'maxima' ajuda mais. limpeza_inicio/limpeza_fim: Wiener mais forte só num trecho.
+    inicio/fim: separa só esse trecho (faixas novas: silêncio fora dele; so_*: fora dele o original continua).
+    Sincronia exata com o vídeo (amostra a amostra). Roda em segundo plano: devolve uma tarefa (acompanhe com
+    `tarefas`). Depois, CONFIRA com `ver_espectro` (você não ouve o áudio): compare a voz separada com a
+    original em trechos sem voz — linhas horizontais na voz = instrumento vazando → refaça com fala=True (se for
+    fala) ou qualidade='maxima' no trecho.
+    Exemplos: "tira a música de fundo" → modo='so_voz'; "faz um karaokê" → modo='so_musica';
+    "separa a bateria e o violão em arquivos" → modo='instrumentos', instrumentos=['bateria','violão'],
+    destino='arquivos'; "quero a voz e a música em faixas separadas" → padrão."""
+    doc, est = _doc()
+    ob = _objetos()
+    from . import separar
+    ob._ort()
+
+    def finalizar(v):
+        if "n" not in v:  # só arquivos: não há versão
+            return v
+        r = _apos_edicao(v, doc)
+        if v.get("arquivos"):
+            r["arquivos"] = v["arquivos"]
+        return r
+    rot = {"so_voz": "deixando só a voz", "so_musica": "tirando a voz", "instrumentos": "separando instrumentos"}
+    return await _tarefa("separar", rot.get(modo, "separando voz e música"), separar.separar, doc, modo, faixa,
+                         inicio, fim, instrumentos, qualidade, limpeza, limpeza_inicio, limpeza_fim, destino, formato,
+                         None, fala, estado=est, finalizar=finalizar)
+
+
+@ferramenta
+async def ver_espectro(faixas: list[int] | None = None, inicio: str | float | None = None,
+                       fim: str | float | None = None, arquivos: list[str] | None = None,
+                       largura: int = 1000) -> list:
+    """Mostra o ESPECTROGRAMA (frequência × tempo, escala log 40 Hz–16 kHz, cores em dBFS) de faixas de áudio do
+    vídeo aberto, um embaixo do outro — para você "ver" o som, já que não o ouve. Use para conferir a
+    `separar_audio`: compare a voz separada com a original; num trecho sem canto, a voz deve ficar escura;
+    linhas horizontais (harmônicos) nela = instrumento vazando. Também serve para achar zumbido (linha fixa),
+    chiado (faixa clara em cima), cortes e silêncios.
+    faixas: [1, 2, 3] (A1, A2...; padrão: todas, até 4). arquivos: caminhos de áudios (ex.: os exportados
+    pela separação), mostrados depois das faixas, no tempo do PRÓPRIO arquivo (o exportado de um trecho começa em
+    0; o de um vídeo inteiro segue a linha do tempo do vídeo); no máximo 4 no total.
+    inicio/fim: intervalo (padrão: 10 s a partir da posição atual;
+    no máximo ~5 min para ainda dar para ver detalhes). O eixo de tempo da imagem conta a partir de `inicio`."""
+    from . import separar
+    est = _estado()
+    arq = Path(est["arquivo_tocando"])
+    n_aud = len(core.faixas_audio(core.ffprobe(arq)))
+    lista = [(arq, f - 1, f"A{f}") for f in (faixas or list(range(1, n_aud + 1))[:4])]
+    for f in faixas or []:
+        core._faixa_valida(f, n_aud)
+    for a in arquivos or []:
+        lista.append((Path(a).expanduser(), 0, Path(a).name))
+    a = _t(inicio, est) if inicio is not None else max(0.0, _t("atual", est))
+    b = _t(fim, est) if fim is not None else a + 10
+    tmp = Path(tempfile.mkdtemp(prefix="espectro-", dir=core.RUNTIME_DIR))
+    img = await _bg(separar.espectrograma, lista, a, b, tmp / "espectro.png", largura)
+    return [f"espectrogramas de {fmt_tempo(a)} a {fmt_tempo(b)} (o eixo de tempo começa em 0 = {fmt_tempo(a)}), "
+            f"de cima para baixo: " + ", ".join(r for _, _, r in lista), Image(path=img)]
+
+
 def main():
     mcp.run()
 
 
 if __name__ == "__main__":
-    main()
+    # `python -m ai_editor.mcp_server`: os módulos mcp_* registram no `ai_editor.mcp_server` importado, não neste
+    # __main__ — roda o servidor daquele módulo para não perder as ferramentas deles
+    from ai_editor.mcp_server import main as _main
+    _main()

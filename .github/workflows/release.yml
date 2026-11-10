@@ -27,7 +27,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            python3.12-dev libmpv2 libxcb-cursor0 mediainfo perl patchelf zsync desktop-file-utils file curl xz-utils git
+            python3.12-dev libmpv2 libxcb-cursor0 mediainfo perl patchelf zsync desktop-file-utils file curl xz-utils git \
+            build-essential cmake binutils
 
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
 
@@ -39,20 +40,54 @@ jobs:
             echo "::error::tag ${GITHUB_REF_NAME} não bate com a versão do pyproject.toml ($versao)"; exit 1
           fi
 
+      # Modelos de IA (~1,5 GB) e downloads fixados: cache entre execuções. A chave muda quando muda qualquer
+      # hash fixado (modelos nos .py, binários no SHA256SUMS) ou a lista de modelos embutidos no build.
+      - name: Cache dos modelos e downloads
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: |
+            ${{ env.AI_EDITOR_BUILD_DIR }}/modelos-cache
+            ${{ env.AI_EDITOR_BUILD_DIR }}/downloads
+          key: modelos-${{ hashFiles('src/ai_editor/fala.py', 'src/ai_editor/objetos.py', 'src/ai_editor/separar.py', 'src/ai_editor/deepfilter.py', 'packaging/SHA256SUMS', 'packaging/build_appimage.sh') }}
+          restore-keys: modelos-
+
+      # O build com os modelos usa ~12 GB (venv, PyInstaller, AppDir ~2 GB, AppImage ~1,8 GB, cache, extração
+      # nos testes): libera os SDKs pré-instalados que não usamos.
+      - name: Espaço em disco
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h "$GITHUB_WORKSPACE" /tmp
+
       - name: Build do AppImage
         run: packaging/build_appimage.sh
+
+      - name: Tamanho do AppImage (limite da Release do GitHub, 2 GiB por arquivo)
+        run: |
+          app="$(ls dist/AI_Editor-*-x86_64.AppImage)"
+          tam="$(stat -c %s "$app")"
+          echo "AppImage: $((tam / 1048576)) MiB"
+          [ "$tam" -lt 2040109465 ] || { echo "::error::AppImage com $((tam / 1048576)) MiB: acima de ~1,9 GiB (limite 2 GiB)"; exit 1; }
 
       - name: Testes do AppImage
         run: |
           app="$(ls dist/AI_Editor-*-x86_64.AppImage)"
-          export APPIMAGE_EXTRACT_AND_RUN=1
+          export APPIMAGE_EXTRACT_AND_RUN=1 NO_CLEANUP=1   # extrai os ~2 GB uma vez só para todos os testes
           "$app" --versao
           find "$AI_EDITOR_BUILD_DIR/AppDir" -name 'libxcb-cursor.so.0*' | grep -q . || { echo "::error::libxcb-cursor fora do pacote"; exit 1; }
           test -s "$AI_EDITOR_BUILD_DIR/AppDir/usr/share/doc/ai-editor/ffmpeg/BIBLIOTECAS.tsv"
           test -f "$AI_EDITOR_BUILD_DIR/AppDir/usr/share/doc/ai-editor/python/pyside6-essentials/LGPL-3"
           "$app" --diagnostico | tee diag.txt
-          for f in ffmpeg ffprobe libmpv mediainfo exiftool c2patool; do
+          for f in ffmpeg ffprobe libmpv mediainfo exiftool c2patool whisper-cli deep-filter; do
             grep -E "✔ $f .*\[pacote\]" diag.txt >/dev/null || { echo "::error::$f não veio do pacote"; exit 1; }
+          done
+          # o --diagnostico importa de verdade o onnxruntime no Python embutido (objetos com IA)
+          grep -E "✔ onnxruntime .*\[pacote\]" diag.txt >/dev/null || { echo "::error::onnxruntime não carrega no AppImage"; exit 1; }
+          test -s "$AI_EDITOR_BUILD_DIR/AppDir/usr/share/doc/ai-editor/whisper.cpp/LICENSE"
+          test -d "$AI_EDITOR_BUILD_DIR/AppDir/usr/share/doc/ai-editor/python/onnxruntime"
+          ls "$AI_EDITOR_BUILD_DIR"/AppDir/usr/lib/whisper/libggml-cpu-*.so | grep -q haswell || { echo "::error::variantes da CPU do ggml ausentes"; exit 1; }
+          # modelos embutidos (nada é baixado ao rodar)
+          for m in whisper sam2.1-tiny lama htdemucs-ft-voz htdemucs-6s; do
+            grep -E "✔ $m " diag.txt >/dev/null || { echo "::error::modelo $m fora do pacote"; exit 1; }
           done
           printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"0"}}}' \
             | timeout 60 "$app" --mcp > init.json

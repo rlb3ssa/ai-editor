@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# Gera o AppImage do AI Editor com tudo embutido (Python + Qt, libmpv, ffmpeg/ffprobe, mediainfo, exiftool, c2patool).
+# Gera o AppImage do AI Editor com tudo embutido (Python + Qt + ONNX Runtime, libmpv, ffmpeg/ffprobe, mediainfo,
+# exiftool, c2patool, whisper-cli portátil, deep-filter) e os modelos de IA: o AppImage não baixa nada ao rodar.
 #
 #   packaging/build_appimage.sh            # build completo → dist/AI_Editor-<versão>-x86_64.AppImage (+ .zsync)
 #
-# Requisitos (Ubuntu 24.04): uv, libmpv2, mediainfo, perl, patchelf (ou uvx), curl, xz-utils, dpkg.
+# Requisitos (Ubuntu 24.04): uv, libmpv2, mediainfo, perl, patchelf (ou uvx), curl, xz-utils, dpkg,
+# g++ e make (build-essential) e cmake (do sistema ou, sem ele, o pacote pip `cmake` via uvx) para o whisper.cpp.
 # Downloads e arquivos intermediários ficam em $AI_EDITOR_BUILD_DIR (padrão ~/.cache/ai-editor-build), fora do repo.
 # Variáveis úteis: FFMPEG_ORIGEM, COMP, JOBS (paralelismo do mksquashfs).
 #
@@ -32,6 +34,21 @@ FFMPEG_ARQ="ffmpeg-n8.1.3-34-ga35157abb9-linux64-gpl-shared-8.1.tar.xz"
 FFMPEG_URL="https://github.com/BtbN/FFmpeg-Builds/releases/download/$FFMPEG_RELEASE/$FFMPEG_ARQ"
 EXIFTOOL_VERSAO="13.62"
 C2PATOOL_VERSAO="0.27.22"
+# whisper.cpp: a versão vem de src/ai_editor/fala.py (WHISPER_VERSAO), a mesma do build local sob demanda; o tarball
+# é conferido aqui pelo SHA256SUMS e de novo pelo fala.py (WHISPER_TARBALL_SHA256).
+WHISPER_VERSAO="$(sed -n 's/^WHISPER_VERSAO = "\(.*\)"/\1/p' "$RAIZ/src/ai_editor/fala.py")"
+WHISPER_URL="https://github.com/ggml-org/whisper.cpp/archive/refs/tags/${WHISPER_VERSAO}.tar.gz"
+WHISPER_ARQ="whisper.cpp-${WHISPER_VERSAO}.tar.gz"
+# DeepFilterNet (deep-filter, binário musl estático oficial): versão e SHA-256 de src/ai_editor/deepfilter.py, repetidos
+# no SHA256SUMS. As licenças (MIT e Apache-2.0) vêm do repositório na mesma tag.
+DF_VERSAO="$(sed -n 's/^VERSAO = "\(.*\)"/\1/p' "$RAIZ/src/ai_editor/deepfilter.py")"
+DF_URL="https://github.com/Rikorose/DeepFilterNet/releases/download/v${DF_VERSAO}/deep-filter-${DF_VERSAO}-x86_64-unknown-linux-musl"
+DF_ARQ="deep-filter-${DF_VERSAO}-x86_64-unknown-linux-musl"
+DF_LICENCAS="https://raw.githubusercontent.com/Rikorose/DeepFilterNet/v${DF_VERSAO}"
+# Modelos de IA embutidos (baixados pelo próprio código do app, com revisão, tamanho e SHA-256 fixos; cache em
+# $BUILD/modelos-cache). Separação: os marcados "embutir": True em separar.MODELOS (separar:embutidos). Ficam de fora
+# (sob demanda só no código-fonte): whisper tiny/base/q5_1 e SAM 2.1 small.
+MODELOS_EMBUTIDOS="${MODELOS_EMBUTIDOS:-whisper:small objetos:sam2.1-tiny objetos:lama separar:embutidos}"
 C2PATOOL_URL="https://github.com/contentauth/c2pa-rs/releases/download/c2patool-v${C2PATOOL_VERSAO}/c2patool-v${C2PATOOL_VERSAO}-x86_64-unknown-linux-gnu.tar.gz"
 APPIMAGETOOL_VERSAO="1.9.1"
 APPIMAGETOOL_URL="https://github.com/AppImage/appimagetool/releases/download/$APPIMAGETOOL_VERSAO/appimagetool-x86_64.AppImage"
@@ -103,6 +120,10 @@ msg "Baixando componentes (cache em $DL)"
 baixar "https://sourceforge.net/projects/exiftool/files/Image-ExifTool-${EXIFTOOL_VERSAO}.tar.gz/download" "exiftool-${EXIFTOOL_VERSAO}.tar.gz" \
     || baixar "https://exiftool.org/Image-ExifTool-${EXIFTOOL_VERSAO}.tar.gz" "exiftool-${EXIFTOOL_VERSAO}.tar.gz"
 baixar "$C2PATOOL_URL" "c2patool-${C2PATOOL_VERSAO}.tar.gz"
+baixar "$WHISPER_URL" "$WHISPER_ARQ"
+baixar "$DF_URL" "$DF_ARQ"
+baixar "$DF_LICENCAS/LICENSE-MIT" "deepfilternet-${DF_VERSAO}-LICENSE-MIT"
+baixar "$DF_LICENCAS/LICENSE-APACHE" "deepfilternet-${DF_VERSAO}-LICENSE-APACHE"
 APPIMAGETOOL="$DL/appimagetool-${APPIMAGETOOL_VERSAO}-x86_64.AppImage"
 baixar "$APPIMAGETOOL_URL" "$(basename "$APPIMAGETOOL")"
 chmod +x "$APPIMAGETOOL"
@@ -131,7 +152,8 @@ fi
 msg "PyInstaller (one-dir)"
 memoria
 cd "$RAIZ"
-uv sync --frozen
+# --extra ia: ONNX Runtime (+ flatbuffers, protobuf, packaging), versões e hashes do uv.lock (objetos com IA).
+uv sync --frozen --extra ia
 EXCLUIR_PY=()
 for m in QtWebEngineCore QtWebEngineWidgets QtWebEngineQuick QtWebChannel QtWebSockets QtWebView \
          Qt3DCore Qt3DRender Qt3DInput Qt3DLogic Qt3DExtras Qt3DAnimation QtQuick QtQuick3D QtQuickWidgets \
@@ -141,12 +163,13 @@ for m in QtWebEngineCore QtWebEngineWidgets QtWebEngineQuick QtWebChannel QtWebS
          QtHttpServer QtAxContainer QtConcurrent QtXml QtSvgWidgets QtPrintSupport; do
     EXCLUIR_PY+=(--exclude-module "PySide6.$m")
 done
-uv run --frozen pyinstaller --noconfirm --clean --onedir --name ai-editor \
+uv run --frozen --extra ia pyinstaller --noconfirm --clean --onedir --name ai-editor \
     --distpath "$BUILD/pyi/dist" --workpath "$BUILD/pyi/work" --specpath "$BUILD/pyi" \
     --paths "$RAIZ/src" \
     --collect-submodules ai_editor \
     --add-data "$RAIZ/src/ai_editor/recursos:ai_editor/recursos" \
     --collect-data qtawesome \
+    --hidden-import onnxruntime \
     --copy-metadata ai-editor \
     --exclude-module tkinter --exclude-module matplotlib --exclude-module IPython \
     "${EXCLUIR_PY[@]}" \
@@ -254,6 +277,55 @@ msg "c2patool $C2PATOOL_VERSAO"
 tar xzf "$DL/c2patool-${C2PATOOL_VERSAO}.tar.gz" -C "$BUILD" c2patool/c2patool c2patool/README.md
 install -m755 "$BUILD/c2patool/c2patool" "$APPDIR/usr/bin/c2patool"
 
+# whisper-cli PORTÁTIL (whisper.cpp): sem -march=native; a ggml vem em .so com o backend de CPU em todas as variantes
+# x86-64 (SSE4.2/AVX/AVX2/AVX-512/AMX...), escolhida ao rodar. Tudo em usr/lib/whisper com RPATH $ORIGIN (a ggml procura
+# as variantes na pasta do executável real). Compilação demorada (~5–10 min com -j4): fica em cache em $BUILD,
+# invalidada se mudar a versão ou as opções de compilação no fala.py.
+msg "whisper-cli $WHISPER_VERSAO (portátil)"
+memoria
+CHAVE_WHISPER="$(cd "$RAIZ" && uv run --frozen --extra ia python -c \
+    'from ai_editor import fala; print(fala.WHISPER_VERSAO, fala.WHISPER_TARBALL_SHA256, fala._OPCOES_CMAKE, fala._OPCOES_PORTATIL)' \
+    | sha256sum | cut -c1-16)"
+WCACHE="$BUILD/whisper-portatil-$CHAVE_WHISPER"
+if [ ! -x "$WCACHE/whisper-cli" ]; then
+    rm -rf "$BUILD"/whisper-portatil-*
+    (cd "$RAIZ" && AI_EDITOR_BUILD_DIR="$BUILD" uv run --frozen --extra ia python -m ai_editor.fala \
+        --compilar-portatil "$WCACHE.tmp" --tarball "$DL/$WHISPER_ARQ" --jobs "$JOBS")
+    mv "$WCACHE.tmp" "$WCACHE"
+fi
+mkdir -p "$APPDIR/usr/lib/whisper"
+cp -a "$WCACHE/." "$APPDIR/usr/lib/whisper/"
+ln -s ../lib/whisper/whisper-cli "$APPDIR/usr/bin/whisper-cli"
+# Conferências: RPATH $ORIGIN, nada "not found" e só bibliotecas de base que toda distro tem (glibc, libstdc++, libgcc_s).
+for f in "$APPDIR"/usr/lib/whisper/*; do
+    readelf -d "$f" | grep -qE '(RPATH|RUNPATH).*\[\$ORIGIN\]' || { echo "    $f sem RPATH \$ORIGIN"; exit 1; }
+    if env -u LD_LIBRARY_PATH ldd "$f" | grep -q 'not found'; then echo "    $f: dependência ausente"; ldd "$f"; exit 1; fi
+    for n in $(readelf -d "$f" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p'); do
+        [[ "$n" =~ ^(libc\.so|libm\.so|libstdc\+\+\.so|libgcc_s\.so|ld-linux|libwhisper\.so|libggml) ]] \
+            || { echo "    $(basename "$f") depende de $n (fora da base do sistema)"; exit 1; }
+    done
+done
+echo "    símbolos mais novos exigidos: $(objdump -T "$APPDIR"/usr/lib/whisper/* 2>/dev/null \
+    | grep -oE 'GLIBC(XX)?_[0-9.]+' | sort -Vu | awk -F_ '{m[$1]=$0} END {print m["GLIBC"], m["GLIBCXX"]}')"
+env -u LD_LIBRARY_PATH "$APPDIR/usr/bin/whisper-cli" --version > "$BUILD/whisper-versao.txt" 2>&1 || true
+grep -q "version" "$BUILD/whisper-versao.txt" || { echo "    whisper-cli não roda"; cat "$BUILD/whisper-versao.txt"; exit 1; }
+du -sh "$APPDIR/usr/lib/whisper"
+
+# deep-filter (DeepFilterNet; binário estático musl, modelo DeepFilterNet3 dentro dele)
+msg "deep-filter $DF_VERSAO"
+install -m755 "$DL/$DF_ARQ" "$APPDIR/usr/bin/deep-filter"
+"$APPDIR/usr/bin/deep-filter" --version
+
+# Modelos de IA (somente leitura em usr/share/ai-editor/modelos, mesma estrutura de ~/.local/share/ai-editor/modelos;
+# o app procura aqui primeiro — binarios.pastas_modelos)
+msg "Modelos de IA embutidos"
+memoria
+mkdir -p "$APPDIR/usr/share/ai-editor/modelos"
+# shellcheck disable=SC2086
+(cd "$RAIZ" && uv run --frozen --extra ia python packaging/modelos.py "$BUILD/modelos-cache" \
+    "$APPDIR/usr/share/ai-editor/modelos" $MODELOS_EMBUTIDOS)
+du -sh "$APPDIR/usr/share/ai-editor/modelos"
+
 # ---------------------------------------------------------------- integração e documentos
 msg "Atalho, ícone, licenças"
 cp "$RAIZ/packaging/AppRun" "$APPDIR/AppRun"
@@ -282,25 +354,54 @@ cp "$RAIZ/LICENSE" "$DOC/LICENSE"
 cp "$RAIZ/packaging/LICENCAS_TERCEIROS.md" "$DOC/"
 cp "$ET/README" "$DOC/exiftool-README" 2>/dev/null || true
 cp "$BUILD/c2patool/README.md" "$DOC/c2patool-README.md"
+# whisper.cpp e ggml: MIT (o LICENSE do repositório cobre os dois)
+mkdir -p "$DOC/whisper.cpp"
+tar xzf "$DL/$WHISPER_ARQ" -O "whisper.cpp-${WHISPER_VERSAO#v}/LICENSE" > "$DOC/whisper.cpp/LICENSE"
+test -s "$DOC/whisper.cpp/LICENSE"
+"$APPDIR/usr/bin/whisper-cli" --version > "$DOC/whisper.cpp/VERSAO.txt" 2>&1 || true
+mkdir -p "$DOC/deepfilternet"
+cp "$DL/deepfilternet-${DF_VERSAO}-LICENSE-MIT" "$DOC/deepfilternet/LICENSE-MIT"
+cp "$DL/deepfilternet-${DF_VERSAO}-LICENSE-APACHE" "$DOC/deepfilternet/LICENSE-APACHE"
+# Modelos: procedência (repositório, revisão, licença, SHA-256) de cada um; textos MIT/Apache-2.0 ao lado.
+mkdir -p "$DOC/modelos"
+for d in "$APPDIR"/usr/share/ai-editor/modelos/*/; do
+    n="$(basename "$d")"
+    if [ -f "$d/ORIGEM.txt" ]; then cp "$d/ORIGEM.txt" "$DOC/modelos/$n-ORIGEM.txt"; fi
+done
+cp "$DOC/whisper.cpp/LICENSE" "$DOC/modelos/whisper-MIT"
 # Textos das licenças comuns (o Qt/PySide6/shiboken6 são LGPL-3.0 — as wheels não trazem o texto — e várias libs do
 # ffmpeg e do Ubuntu são GPL/LGPL/BSD/Apache/MPL).
 mkdir -p "$DOC/licencas-comuns"
 for l in GPL-2 GPL-3 LGPL-2.1 LGPL-3 Apache-2.0 BSD MPL-2.0 Artistic; do
     cp -L "/usr/share/common-licenses/$l" "$DOC/licencas-comuns/$l"
 done
+cp "$DOC/licencas-comuns/Apache-2.0" "$DOC/modelos/Apache-2.0"
 # Pacotes Python embutidos: os arquivos de licença dos dist-info (PySide6/shiboken6: LGPL-3 acima + o campo License).
 mkdir -p "$DOC/python"
-SITE="$(cd "$RAIZ" && uv run --frozen python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
-(cd "$RAIZ" && uv export --frozen --no-dev --no-hashes --no-emit-project --no-header) | grep -v '^ *#' \
+SITE="$(cd "$RAIZ" && uv run --frozen --extra ia python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
+(cd "$RAIZ" && uv export --frozen --no-dev --extra ia --no-hashes --no-emit-project --no-header) | grep -v '^ *#' \
     | sed -n 's/^\([A-Za-z0-9_.-]*\)==\([^ ;]*\).*/\1 \2/p' | while read -r pkg ver; do
     norm="$(echo "$pkg" | tr 'A-Z.-' 'a-z__')"
     di="$(find "$SITE" -maxdepth 1 -iname "${norm}-${ver}.dist-info" | head -1)"
     [ -n "$di" ] || continue
     mkdir -p "$DOC/python/$pkg"
     grep -m1 -E '^License(-Expression)?:' "$di/METADATA" > "$DOC/python/$pkg/METADATA-licenca.txt" || true
-    find "$di" \( -iname 'LICEN[CS]E*' -o -iname 'COPYING*' -o -iname 'NOTICE*' -o -iname 'AUTHORS*' \) -type f \
-        -exec cp {} "$DOC/python/$pkg/" \;
+    find "$di" \( -iname 'LICEN[CS]E*' -o -iname 'COPYING*' -o -iname 'NOTICE*' -o -iname 'AUTHORS*' \
+        -o -iname '*ThirdPartyNotices*' \) -type f -exec cp {} "$DOC/python/$pkg/" \;
     if [ -d "$di/licenses" ]; then cp -r "$di/licenses/." "$DOC/python/$pkg/"; fi
+    # alguns pacotes (onnxruntime) põem LICENSE/ThirdPartyNotices na pasta do módulo, não no dist-info
+    if [ -f "$di/top_level.txt" ]; then
+        while read -r mod; do
+            [ -n "$mod" ] && [ -d "$SITE/$mod" ] || continue
+            find "$SITE/$mod" -maxdepth 1 -type f \( -iname 'LICEN[CS]E*' -o -iname 'COPYING*' -o -iname 'NOTICE*' \
+                -o -iname '*ThirdPartyNotices*' \) -exec cp {} "$DOC/python/$pkg/" \;
+        done < "$di/top_level.txt"
+    fi
+    # sem texto nenhum (ex.: flatbuffers): o texto comum da licença declarada
+    if [ -z "$(find "$DOC/python/$pkg" -type f ! -name METADATA-licenca.txt)" ] \
+        && grep -qi apache "$DOC/python/$pkg/METADATA-licenca.txt" 2>/dev/null; then
+        cp "$DOC/licencas-comuns/Apache-2.0" "$DOC/python/$pkg/"
+    fi
 done
 for d in "$DOC"/python/pyside6* "$DOC"/python/shiboken6; do
     if [ -d "$d" ]; then cp "$DOC/licencas-comuns/LGPL-3" "$DOC/licencas-comuns/GPL-3" "$d/"; fi
@@ -320,9 +421,19 @@ done
     fi
     echo "exiftool $EXIFTOOL_VERSAO — Artistic/GPL-1.0+ — fonte: https://exiftool.org/ (incluso: usr/lib/exiftool)"
     echo "c2patool $C2PATOOL_VERSAO — MIT/Apache-2.0 — fonte: https://github.com/contentauth/c2pa-rs/tree/c2patool-v$C2PATOOL_VERSAO"
+    echo "whisper-cli (whisper.cpp $WHISPER_VERSAO + ggml) — MIT — compilado do código-fonte $WHISPER_URL"
+    echo "    (portátil: GGML_NATIVE=OFF, GGML_BACKEND_DL, GGML_CPU_ALL_VARIANTS; em usr/lib/whisper) — https://github.com/ggml-org/whisper.cpp/tree/$WHISPER_VERSAO"
+    echo "deep-filter (DeepFilterNet) $DF_VERSAO — MIT OR Apache-2.0 — binário oficial $DF_URL"
+    echo "    fonte: https://github.com/Rikorose/DeepFilterNet/tree/v$DF_VERSAO"
+    echo
+    echo "## Modelos de IA embutidos (usr/share/ai-editor/modelos; procedência em usr/share/doc/ai-editor/modelos/)"
+    for d in "$APPDIR"/usr/share/ai-editor/modelos/*/; do
+        echo "$(basename "$d") — $(du -sm "$d" | cut -f1) MB"
+        sed 's/^/    /' "$d/ORIGEM.txt" 2>/dev/null || true
+    done
     echo
     echo "## Pacotes Python (embutidos pelo PyInstaller; PySide6 traz o Qt $(uv run --frozen python -c 'import PySide6.QtCore as q; print(q.qVersion())' 2>/dev/null))"
-    (cd "$RAIZ" && uv export --frozen --no-dev --no-hashes --no-emit-project --no-header | grep -v '^ *#' | sed 's/ ;.*//')
+    (cd "$RAIZ" && uv export --frozen --no-dev --extra ia --no-hashes --no-emit-project --no-header | grep -v '^ *#' | sed 's/ ;.*//')
     echo
     echo "AppImage: appimagetool $APPIMAGETOOL_VERSAO, runtime type2 $RUNTIME_VERSAO (MIT) — https://github.com/AppImage"
     echo "Licenças: usr/share/doc/ai-editor/{licencas-comuns,python,ubuntu,ffmpeg} (dentro do AppImage: --appimage-extract)"
@@ -334,7 +445,7 @@ done
     # Tudo o que está no AppDir e veio do sistema (inclusive o que o PyInstaller recolheu para _internal).
     {
         cat "$BUILD/libs-sistema.txt"
-        find "$APPDIR/usr" -name '*.so*' -not -path '*/PySide6/*' -not -path '*/ffmpeg/*' -not -path '*.libs/*' \
+        find "$APPDIR/usr" -name '*.so*' -not -path '*/PySide6/*' -not -path '*/ffmpeg/*' -not -path '*/whisper/*' -not -path '*.libs/*' \
             -printf '%f\n' | while read -r n; do ldconfig -p | awk -v n="$n" '$1 == n && /x86-64/ {print $NF; exit}'; done
     } | awk -F/ '!v[$NF]++' | while read -r lib; do
         pkg="$(dpkg -S "$(readlink -f "$lib")" 2>/dev/null | head -1 | sed 's/: .*//')"

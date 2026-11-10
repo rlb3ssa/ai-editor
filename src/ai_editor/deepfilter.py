@@ -6,8 +6,9 @@ fixos) para ~/.local/share/ai-editor/bin/deep-filter; o binário funciona igual 
 
 Como o áudio passa por ele:
   - a faixa (ou só o trecho pedido, com 2 s de folga antes para a rede "aquecer") é extraída em 48 kHz
-    float32 (a taxa nativa do modelo), em blocos de 5 min, cada um com folga antes e depois — assim a memória
-    fica limitada (~60 MB por canal por bloco) mesmo em arquivos de horas;
+    float32 (a taxa nativa do modelo) e processada em blocos de 30 s a 5 min, cada um com folga antes e depois,
+    vários ao mesmo tempo (o deep-filter usa 1 núcleo; `_trabalhadores` olha núcleos e memória livre) — a
+    memória fica limitada mesmo em arquivos de horas;
   - cada bloco roda com `-D` (compensa o atraso da STFT + lookahead, ~30 ms) e silêncio extra no fim
     (o atraso compensado encurta a saída); do resultado se aproveita exatamente o miolo do bloco,
     amostra por amostra, então a sincronia com o vídeo é a original;
@@ -20,11 +21,13 @@ from __future__ import annotations
 
 import os
 import shlex
+import shutil
 import struct
 import subprocess
 import sys
-import tempfile
+import threading
 import wave
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from . import binarios, core
@@ -83,6 +86,20 @@ def _cabecalho_wav_f32(n_quadros: int, canais: int) -> bytes:
             + b"fmt " + struct.pack("<I", len(fmt)) + fmt + b"data" + struct.pack("<I", dados))
 
 
+def _trabalhadores(canais: int) -> int:
+    """Quantos deep-filter rodar ao mesmo tempo: metade dos núcleos (máx. 4), limitado pela memória livre
+    (~150 MB do processo + até ~250 MB do bloco por canal, deixando 1,5 GB de folga para o resto do sistema)."""
+    n = max(1, min(4, (os.cpu_count() or 2) // 2))
+    try:
+        with open("/proc/meminfo") as f:
+            livre = next(int(l.split()[1]) * 1024 for l in f if l.startswith("MemAvailable:"))
+        por = (150 + 250 * canais) << 20
+        n = max(1, min(n, (livre - (1536 << 20)) // por))
+    except (OSError, StopIteration, ValueError):
+        pass
+    return int(n)
+
+
 def _rodar(cmd: list[str], rotulo: str) -> None:
     r = subprocess.run(cmd, capture_output=True, text=True,
                        preexec_fn=core._morrer_com_pai if core._prctl is not None else None)
@@ -110,38 +127,51 @@ def processar(entrada: Path, faixa: int, inicio: float, fim: float | None, canai
     if b <= a:
         raise ValueError("o trecho não tem áudio nessa faixa")
     saida = pasta / "saida.s16"
-    bloco, antes, depois = round(_BLOCO_S * SR), round(_ANTES_S * SR), round(_DEPOIS_S * SR)
-    feitos = 0
-    with open(bruto, "rb") as fin, open(saida, "wb") as fout:
-        c0 = a
-        while c0 < b:
-            c1 = min(b, c0 + bloco)
-            e0, e1 = max(i0, c0 - antes), min(i0 + n_total, c1 + depois)
+    antes, depois = round(_ANTES_S * SR), round(_DEPOIS_S * SR)
+    # o deep-filter usa 1 núcleo: blocos em paralelo (até metade dos núcleos, no máx. 4, e só com memória
+    # sobrando — cada processo usa ~150 MB + o bloco). Blocos de 30 s a 5 min, ~1 por processo.
+    trabalhadores = _trabalhadores(canais)
+    bloco = round(min(_BLOCO_S, max(30.0, (b - a) / SR / trabalhadores)) * SR)
+    blocos = [(c0, min(b, c0 + bloco)) for c0 in range(a, b, bloco)]
+    feitos = [0]
+    trava = threading.Lock()
+
+    def um(i_c):
+        i, (c0, c1) = i_c
+        e0, e1 = max(i0, c0 - antes), min(i0 + n_total, c1 + depois)
+        d = pasta / f"b{i:05d}"
+        (d / "out").mkdir(parents=True, exist_ok=True)
+        wav_in = d / "bloco.wav"
+        with open(bruto, "rb") as fin, open(wav_in, "wb") as w:
             fin.seek((e0 - i0) * quadro)
-            dados = fin.read((e1 - e0) * quadro)
-            pad = depois * quadro  # silêncio no fim: o -D tira o atraso do começo e a saída encurta
-            wav_in = pasta / "bloco.wav"
-            with open(wav_in, "wb") as w:
-                w.write(_cabecalho_wav_f32((e1 - e0) + depois, canais))
-                w.write(dados)
-                w.write(b"\0" * pad)
-            pasta_out = pasta / "out"
-            pasta_out.mkdir(exist_ok=True)
-            _rodar([exe, "-D", "-a", f"{atenuacao_db:g}", "-o", str(pasta_out), str(wav_in)], "deep-filter")
-            with wave.open(str(pasta_out / wav_in.name), "rb") as w:
-                if w.getnchannels() != canais or w.getframerate() != SR or w.getsampwidth() != 2:
-                    raise RuntimeError(f"deep-filter devolveu formato inesperado: {w.getnchannels()} canais, "
-                                       f"{w.getframerate()} Hz, {8 * w.getsampwidth()} bits")
-                n_out = w.getnframes()
-                ini, n = c0 - e0, c1 - c0
-                if n_out < ini + n:
-                    raise RuntimeError(f"deep-filter devolveu {n_out} amostras, esperava ≥ {ini + n}")
-                w.setpos(ini)
-                fout.write(w.readframes(n))
-            feitos += c1 - c0
+            w.write(_cabecalho_wav_f32((e1 - e0) + depois, canais))
+            w.write(fin.read((e1 - e0) * quadro))
+            w.write(b"\0" * (depois * quadro))  # silêncio no fim: o -D tira o atraso do começo e a saída encurta
+        _rodar([exe, "-D", "-a", f"{atenuacao_db:g}", "-o", str(d / "out"), str(wav_in)], "deep-filter")
+        wav_in.unlink()
+        with wave.open(str(d / "out" / "bloco.wav"), "rb") as w:
+            if w.getnchannels() != canais or w.getframerate() != SR or w.getsampwidth() != 2:
+                raise RuntimeError(f"deep-filter devolveu formato inesperado: {w.getnchannels()} canais, "
+                                   f"{w.getframerate()} Hz, {8 * w.getsampwidth()} bits")
+            ini, n = c0 - e0, c1 - c0
+            if w.getnframes() < ini + n:
+                raise RuntimeError(f"deep-filter devolveu {w.getnframes()} amostras, esperava ≥ {ini + n}")
+            w.setpos(ini)
+            (d / "miolo.s16").write_bytes(w.readframes(n))
+        (d / "out" / "bloco.wav").unlink()
+        with trava:
+            feitos[0] += n
             if progresso:
-                progresso(feitos / (b - a))
-            c0 = c1
+                progresso(feitos[0] / (b - a))
+        return d / "miolo.s16"
+
+    with ThreadPoolExecutor(max_workers=trabalhadores) as ex:
+        partes = list(ex.map(um, enumerate(blocos)))
+    with open(saida, "wb") as fout:
+        for p in partes:
+            with open(p, "rb") as f:
+                shutil.copyfileobj(f, fout, 1 << 22)
+            p.unlink()
     bruto.unlink(missing_ok=True)
     return saida, b - a
 

@@ -37,6 +37,7 @@ import os
 import re
 import shlex
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -55,6 +56,16 @@ except ImportError:  # pragma: no cover
 
 DICA_IA = ("as funções de objetos precisam do ONNX Runtime (opcional). Habilite com `uv sync --extra ia` "
            "(no código-fonte) ou `pip install onnxruntime numpy` no mesmo Python do AI Editor")
+# Empacotado (AppImage/PyInstaller) o ONNX Runtime vem DENTRO do pacote: se faltar, o pacote está quebrado e a dica
+# de `uv sync`/`pip` não serve para nada.
+DICA_IA_PACOTE = ("o ONNX Runtime deveria vir dentro do AppImage, mas não carregou ({erro}). Baixe o AppImage de "
+                  "novo; se persistir, rode `ai-editor --diagnostico` e abra uma issue com a saída")
+
+
+def _dica_ia(erro: BaseException | None = None) -> str:
+    if getattr(sys, "frozen", False):
+        return DICA_IA_PACOTE.format(erro=erro or "numpy ausente")
+    return DICA_IA
 
 
 class IAIndisponivel(RuntimeError):
@@ -120,6 +131,13 @@ def _mb(n: int) -> str:
 
 
 def _pasta_modelo(nome: str) -> Path:
+    """Pasta do modelo: a embutida no pacote (AppImage, somente leitura) se tiver todos os arquivos; senão a do
+    usuário (MODELOS_OBJ_DIR/<nome>, onde o download grava)."""
+    m = MODELOS.get(nome)
+    if m:
+        for d in binarios.pastas_modelos():
+            if d != MODELOS_OBJ_DIR and all((d / nome / Path(a).name).is_file() for a, _, _ in m["arquivos"]):
+                return d / nome
     return MODELOS_OBJ_DIR / nome
 
 
@@ -140,6 +158,8 @@ def _arquivo_integro(p: Path, tam: int, sha: str) -> bool:
         return False
     if st.st_size != tam:
         return False
+    if binarios.modelo_embutido(p):  # do pacote: SHA-256 conferido no build, somente leitura
+        return True
     ok = p.with_name(f".{p.name}.ok")
     assinatura = f"{st.st_size} {st.st_mtime_ns} {sha}"
     try:
@@ -260,6 +280,10 @@ def baixar_modelo(nome: str, progresso=None, cancelar=None) -> Path:
     pasta = _pasta_modelo(nome)
     if modelo_pronto(nome):
         return pasta
+    if not binarios.downloads_permitidos():
+        prontos = [k for k in MODELOS if modelo_pronto(k)]
+        raise IAIndisponivel(f"o modelo '{nome}' não vem neste AppImage (e o AppImage não baixa nada). "
+                             f"Modelos embutidos: {', '.join(prontos) or 'nenhum'}")
     with _trava_arquivo(MODELOS_OBJ_DIR / f".{nome}.lock", cancelar):
         if modelo_pronto(nome):
             return pasta
@@ -304,11 +328,11 @@ THREADS = 4
 
 def _ort():
     if np is None:
-        raise IAIndisponivel(DICA_IA)
+        raise IAIndisponivel(_dica_ia())
     try:
         import onnxruntime as ort
     except ImportError as e:
-        raise IAIndisponivel(DICA_IA) from e
+        raise IAIndisponivel(_dica_ia(e)) from e
     return ort
 
 
@@ -1266,7 +1290,7 @@ def segmentar(doc: Documento, tempo: float, pontos=None, pontos_negativos=None, 
     Grava a máscara (FFV1 cinza) + .json em ~/.cache/ai-editor/mascaras/<hash do original>/ e devolve resumo +
     quadros de conferência."""
     if np is None:
-        raise IAIndisponivel(DICA_IA)
+        raise IAIndisponivel(_dica_ia())
     _ort()
     with trava_ia(cancelar, etapa):
         return _segmentar(doc, tempo, pontos, pontos_negativos, caixa, inicio, fim, extras, modelo, passo_quadros,
@@ -2043,7 +2067,7 @@ def _remover(doc, mascara, metodo, margem, progresso, cancelar, etapa) -> dict:
         if metodo == "auto":
             metodo = "rapido"
             avisos.append("sem ONNX Runtime (IA opcional): usei o preenchimento rápido, sem modelo. Para 'fundo'/'lama' "
-                          "com LaMa: " + DICA_IA)
+                          "com LaMa: " + _dica_ia())
     m = ler_mascara(doc, mascara)
     entrada = doc.atual()
     info = core._midia(entrada)

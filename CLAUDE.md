@@ -25,6 +25,13 @@ O spec, o roadmap e as decisões ficam em **`plano.md`** — leia antes de come�
 | `src/ai_editor/fala.py` | Fala/legendas (Fase 6, sem Qt): whisper.cpp sob demanda, modelos com SHA-256, transcrição com cache, .srt/.vtt, gravar/embutir legenda, `buscar_fala` |
 | `src/ai_editor/mcp_server.py` | Servidor MCP (stdio); fala com a janela pelo socket |
 | `src/ai_editor/objetos.py` | Fase 7, sem Qt: IA local sob demanda (ONNX Runtime opcional, extra `ia`) — SAM 2.1 segmenta/rastreia, LaMa remove; máscaras, fundo, recorte com alfa, tarefas em segundo plano |
+| `src/ai_editor/separar.py` | Separação de áudio, sem Qt: Demucs v4 em ONNX Runtime (sem PyTorch) — voz/música, karaokê e instrumentos (até 6 fontes) em faixas novas ou arquivos; qualidades rápida/alta/máxima, limpeza de vazamento (Wiener), espectrograma (`ver_espectro`) |
+| `src/ai_editor/efeitos_audio.py` | "Canivete suíço" de áudio, sem Qt: equalizador com presets, efeitos de voz (eco, reverb por IR sintética, robô, telefone, rádio, esquilo/monstro...), tom (rubberband), dinâmica (nivelar fala, compressor, limitador, de-esser, gate, cliques, distorção), canais, sincronia de faixa, censura com bipe (whisper), loudness em LUFS, inverter, mixar faixas; latência de cada filtro MEDIDA e compensada |
+| `src/ai_editor/mcp_audio.py` | Ferramentas MCP do canivete de áudio (registradas pelo `mcp_server.py`): `equalizar`, `efeito_voz`, `mudar_tom`, `dinamica_audio`, `canais_audio`, `sincronizar_audio`, `censurar_palavras`, `normalizar_volume`, `inverter_audio`, `mixar_faixas` |
+| `src/ai_editor/arquivos.py` | "Canivete suíço" de arquivos, sem Qt: quadros em imagens, folha de contatos, capa embutida, slideshow de fotos, áudio → vídeo com visualizador, metadados/privacidade (GPS, câmera, C2PA; conferido com exiftool/c2patool), remux sem perda, reparo, legendas em arquivo, rotação sem reencodar, VMAF/SSIM/PSNR |
+| `src/ai_editor/mcp_arquivos.py` | Ferramentas MCP do canivete de arquivos: `extrair_quadros`, `folha_contatos`, `capa`, `video_de_imagens`, `audio_para_video`, `editar_metadados`, `converter_sem_perda`, `reparar_arquivo`, `rotacao_sem_perda`, `legenda_arquivo`, `comparar_qualidade` |
+| `src/ai_editor/efeitos_video.py` | "Canivete suíço" de vídeo, sem Qt: efeitos prontos (P&B, sépia, VHS, desenho, glow...), LUT (.cube/Hald), chroma key (fundo imagem/vídeo/cor/transparente .webm), PiP e tela dividida, zoom suave (`perspective`), inverter/boomerang/loop (por segmentos de quadros; longos em 2 passadas com intermediário FFV1/FLAC), câmera lenta interpolada, fade de imagem, caixa/barra de progresso/cronômetro, melhorar imagem (ruído, desentrelaçar, upscale), fps, bordas pretas, logo, perspectiva/360° |
+| `src/ai_editor/mcp_video.py` | Ferramentas MCP do canivete de vídeo: `efeito_visual`, `aplicar_lut`, `chroma_key`, `sobrepor_video`, `zoom`, `fade_video`, `desenhar`, `melhorar_video`, `mudar_fps`, `cortar_bordas_pretas`, `remover_logo`, `perspectiva`, `inverter_video`, `repetir`, `camera_lenta_suave` |
 | `packaging/` | AppImage (`build_appimage.sh`, `SHA256SUMS` dos downloads fixados), bundle `.mcpb`, licenças de terceiros |
 
 Fluxo: Claude → MCP (`ai-editor-mcp`) → socket Unix JSON-lines (`{"cmd":..., ...}` → `{"ok", "dados"|"erro"}`) → janela.
@@ -58,7 +65,16 @@ cancelar/fechar/estado, `predefinicao`, `trecho`=índice no combo, `limite_mb`, 
   `binarios.caminho(nome)` (erro com dica de instalação) ou `core.FFMPEG`/`core.FFPROBE`.
 - Ferramenta nova → registrar em `binarios.REGISTRO` (e recursos do ffmpeg em `RECURSOS_FFMPEG`) e na
   seção 5 do `plano.md`, com licença compatível com GPL-3.0.
-- `ai-editor --diagnostico` (ou a ferramenta MCP `diagnostico`) mostra o que foi encontrado e o que falta.
+- `ai-editor --diagnostico` (ou a ferramenta MCP `diagnostico`) mostra o que foi encontrado e o que falta, inclusive
+  os módulos Python de IA (`binarios.MODULOS_PY`: importa de verdade o `onnxruntime`; no AppImage aparece `[pacote]`).
+- AppImage = **nada é baixado ao rodar**. O `build_appimage.sh` faz `uv sync --frozen --extra ia` (ONNX Runtime e deps
+  do `uv.lock` no pacote; licenças em `usr/share/doc/ai-editor/python/`), compila o whisper-cli portátil, põe o
+  `deep-filter` em `usr/bin` e os modelos em `usr/share/ai-editor/modelos/` (`packaging/modelos.py`: whisper small,
+  SAM 2.1 tiny, LaMa e os `"embutir": True` do `separar.MODELOS`). Modelos SEMPRE por `binarios.caminho_modelo()` /
+  `pastas_modelos()` (pacote primeiro, somente leitura; depois `~/.local/share/ai-editor/modelos`); antes de baixar,
+  `binarios.downloads_permitidos()` (False empacotado → erro claro). Modelo novo que deve ir no pacote: marque-o
+  (`"embutir": True`) ou inclua em `MODELOS_EMBUTIDOS` do build e confira o tamanho (< 2 GiB por arquivo na Release).
+  Empacotado, a dica "uv sync --extra ia" do `objetos.py` nunca aparece (`_dica_ia`).
 
 ## Regras importantes
 - **Nunca** use `pkill -f ai-editor`/`claude-player` nem `kill` por padrão de nome: mata o servidor MCP e o
@@ -150,7 +166,12 @@ cancelar/fechar/estado, `predefinicao`, `trecho`=índice no combo, `limite_mb`, 
   soltas após 5 min ociosas (20 s se MemAvailable < 2,5 GB). Uma IA por vez: `trava_ia` = RLock + flock em
   `~/.cache/ai-editor/ia.lock` (entre processos), ambos canceláveis na fila; durante a inferência pausa abaixo de
   1,2 GB livres (`_pausa_memoria`). Modelo pronto = marcador `.ok` (tamanho, mtime, hash).
-- Fala (Fase 6, `fala.py`): `whisper-cli` em `~/.local/share/ai-editor/bin` (compilar: `python -m ai_editor.fala
+- Fala (Fase 6, `fala.py`): no AppImage o `whisper-cli` vem PRONTO (`usr/lib/whisper/`, link em `usr/bin`; origem
+  `[pacote]`): build portátil feito pelo `build_appimage.sh` via `python -m ai_editor.fala --compilar-portatil PASTA`
+  (`GGML_NATIVE=OFF` + `GGML_BACKEND_DL` + `GGML_CPU_ALL_VARIANTS`: libggml/libwhisper em .so com RPATH `$ORIGIN` e
+  14 variantes `libggml-cpu-*.so`, escolhidas ao rodar pela CPU). A ggml procura as variantes na pasta do executável
+  E na pasta atual: por isso `_rodar_whisper` roda com `cwd` = pasta do executável. Do código-fonte, o
+  `whisper-cli` fica em `~/.local/share/ai-editor/bin` (compilar nativo, estático: `python -m ai_editor.fala
   --instalar-whisper`; `--status` mostra motor/modelos). Os tempos de segmento do whisper vêm arredondados em janelas de
   ~4 s: use o DTW (`--dtw base` **com `-nfa`**; com flash attention o `t_dtw` sai −1 sem aviso). Não use `--vad` junto:
   ele remapeia só os segmentos, não os tokens/DTW. Legenda queimada: gerar `.ass` com PlayRes = vídeo e estilo no
@@ -159,6 +180,39 @@ cancelar/fechar/estado, `predefinicao`, `trecho`=índice no combo, `limite_mb`, 
   Texto de .srt/.vtt vai para o ASS por `ler_legenda` + `_esc_ass` (nunca pela conversão do ffmpeg, que interpreta
   `{...}` e `\N` do texto). Um whisper-cli por vez (`_trava("whisper")`); ffmpeg da fala com `_rodar_ff` (PDEATHSIG).
   Testes de fala sem TTS no sistema: `uvx --from piper-tts piper` + voz `pt_BR-faber-medium` (só no scratchpad).
+
+- Separação de áudio (`separar.py`): exports ONNX MIT do StemSplit (htdemucs, htdemucs_ft por fonte, htdemucs_6s;
+  STFT/iSTFT DENTRO do grafo, entrada fixa `mix` [1,2,343980] = 7,8 s a 44,1 kHz; saída na ordem drums, bass, other,
+  vocals, guitar, piano). Sessão SEM o otimizador `ConstantFolding` e sem arena (`_sessao`): com ele o ORT dobra os
+  índices do ScatterND do iSTFT e o pico vai a 6–8 GB; sem ele ~1,4 GB e a mesma velocidade. O ffmpeg que alimenta a rede é morto ao
+  parar de ler antes do fim (trecho): o código de saída dele aí não é erro. Blocos com rampas
+  lineares cuja soma dá 1 (overlap-add), leitura em fluxo do ffmpeg (`aresample=44100`, nunca o arquivo todo na RAM),
+  passadas em `.f32` no disco (memmap). Qualidade: passadas extras = grade deslocada (zeros na frente) e/ou canais
+  trocados, média ponderada; limpeza = Wiener (máscaras |S|^p/Σ|S|^p, soma 1) com TODAS as fontes —
+  desligada por padrão (medido: piora ~4 dB). Vazamento em FALA: `fala=True` passa a voz pelo DeepFilterNet
+  (`deepfilter.processar`, +8 dB no caso difícil). Medidas e decisões no plano.md (Fase 4). "Música" = mistura −
+  voz final (voz + música = original exato), e `so_voz`/`so_musica` = original − a outra parte (fora do trecho fica o
+  original). Na linha do tempo: `amerge` com uma referência MUDA da própria faixa (mesmo nº de canais; `aformat`
+  completo nas duas entradas, senão "could not choose their formats") dá a duração exata da faixa; depois
+  `asetpts=PTS-STARTPTS+st/TB`. Reencodar em AAC desloca 16–32 amostras (priming/arredondamento do contêiner; igual a
+  qualquer reencode do ffmpeg — conferido com controle). Modelos `"embutir": True` (vão no AppImage); download fixado
+  só como alternativa do código-fonte.
+
+- Canivete de arquivos (`arquivos.py`): remux MP4/MOV perde as chaves `mdta` (com.apple.quicktime.make/location...) sem
+  `-movflags use_metadata_tags`, e o nome da faixa (`name`) só é regravado a partir de `title` (`_mapas` converte). Capa
+  no MKV = `-attach cover.jpg` + mimetype (mapear um vídeo `attached_pic` não vira capa). `-display_rotation` vale no 6.1 e
+  no 8.1 (ângulo anti-horário). Extrair 1 quadro em JPEG depois do último quadro falha no 8.1 ("Non full-range YUV"),
+  não só sai vazio: tratar como "sem quadro". Quadro a quadro com o tempo real: `metadata=mode=add` + `mode=print:file=`.
+  `loop` + `fps` perde o último quadro no EOF: gerar 1 a mais e cortar com `-frames:v`.
+- Canivete de áudio (`efeitos_audio.py`): todo efeito passa por `_aplicar` → `_envolver`: a faixa vai para t=0
+  (`asetpts=PTS-STARTPTS`), recebe o filtro, a latência MEDIDA do fragmento (`latencia()`: clique ou correlação de
+  envelopes de ruído, cache por fragmento/sr/layout) é compensada com `apad`+`atrim=start` e a faixa volta ao seu
+  start_time. Efeito com cauda (eco/reverb) = `exato` (apad até o fim + atrim na duração). Trecho (inicio/fim) =
+  crossfade `dry − G·dry + E(G·dry)` com G por `afade` (30 ms); subtrair é `volume=-1` (amix `weights='1 -1'` NÃO
+  subtrai). `amix` sempre `duration=longest` + `atrim`. Latências medidas (6.1 e 8.1): afftfilt 512/0,75 = 384
+  amostras; dialoguenhance 32 ms; firequalizer 10 ms (evitado); loudnorm sai em 192 kHz (não usado: o normalizar é
+  ganho + alimiter com 4× sobreamostragem); rubberband desloca −10/+13 ms conforme o tom (medido a cada chamada);
+  `afir` normaliza com `gtype=none` no 6.1 e `irnorm=-1` no 8.1 (`_tem_opcao`).
 
 ## Git
 - Trabalhe na branch **`dev`**. Commits pequenos, mensagem em português no imperativo

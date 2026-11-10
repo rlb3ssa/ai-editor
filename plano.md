@@ -107,6 +107,79 @@ tarefas: a ferramenta espera até 50 s e, se não terminou, devolve o id da tare
   (VP9 `yuva420p` / ProRes 4444) ou o vídeo P&B da máscara; `inverter=True` deixa o objeto transparente.
 - `tarefas(id, acao=estado|esperar|cancelar)` e `objetos_ia(baixar)` (ONNX Runtime, modelos, memória, máscaras do vídeo).
 
+Áudio com IA (`separar.py`; Demucs v4 em ONNX Runtime; tarefa em segundo plano):
+- `separar_audio(modo=faixas|so_voz|so_musica|instrumentos, faixa, inicio, fim, instrumentos, qualidade=rapida|alta|maxima,
+  limpeza=nao|leve|media|forte, limpeza_inicio, limpeza_fim, destino=faixas|arquivos|ambos, formato)`: faixas novas
+  "Voz"/"Música (sem voz)" ou uma por instrumento (voz, bateria, baixo, guitarra/violão, piano, outros), ou a faixa
+  trocada por só a voz / karaokê; arquivos `<nome>.voz.wav`... ao lado do vídeo (nunca sobrescreve).
+- `ver_espectro(faixas, inicio, fim, arquivos, largura)`: espectrogramas (log 40 Hz–16 kHz, legenda em dBFS) um embaixo do
+  outro, para o Claude "ver" vazamento, zumbido, chiado.
+
+Canivete suíço de áudio (`efeitos_audio.py` + `mcp_audio.py`; só ffmpeg; cada uma cria uma versão; só a faixa
+escolhida muda — vídeo e outras faixas copiados sem perda; latência de cada filtro medida e compensada; `inicio`/`fim`
+aplicam só num trecho com transição de 30 ms):
+- `equalizar(preset, graves_db, medios_db, agudos_db, bandas=[{freq, ganho, largura}], faixa, inicio, fim)`: presets
+  voz, podcast, mais/menos_graves, mais/menos_agudos, mais/menos_medios, clareza, abafado, telefone, sem_ronco,
+  sem_chiado, sem_zumbido_60/50.
+- `efeito_voz(efeito, intensidade, faixa, inicio, fim)`: eco, reverb, banheiro, caverna, estadio, robo, telefone, radio,
+  megafone, esquilo, monstro, sussurro, subaquatico.
+- `mudar_tom(semitons, manter_velocidade, preservar_formantes, faixa, inicio, fim)`: rubberband (sem ele, asetrate+atempo).
+- `dinamica_audio(modo, intensidade, faixa, inicio, fim)`: nivelar_fala, nivelar_suave, compressor, limitador, deesser,
+  gate, remover_cliques, remover_distorcao.
+- `canais_audio(acao, intensidade, faixa, inicio, fim)`: mono, estereo, trocar, so_esquerdo, so_direito, separar
+  (L e R em faixas), ampliar_estereo, estreitar_estereo, realcar_centro, remover_centro (karaokê simples), inverter_fase.
+- `sincronizar_audio(deslocamento_ms, faixa)`: atrasa (+) ou adianta (−) uma faixa em relação ao vídeo, duração mantida.
+- `censurar_palavras(palavras, trechos, som=bipe|silencio, faixa, idioma, modelo, margem_ms, limiar, volume_bip_db)`:
+  acha as palavras com o whisper (`fala.buscar_fala`) e põe bipe/silêncio; devolve `ocorrencias`.
+- `normalizar_volume(alvo=youtube|spotify|podcast|tv|... ou LUFS, pico_db, faixa)`: loudness integrado exato + teto de
+  pico verdadeiro; mede antes e depois.
+- `inverter_audio(faixa, inicio, fim)`: áudio de trás para frente.
+- `mixar_faixas(faixas, volumes_db, destino=nova|substituir, titulo)`: soma faixas do arquivo (cada uma no seu tempo).
+
+Canivete suíço de vídeo (`efeitos_video.py` + `mcp_video.py`; só ffmpeg; cada uma cria uma versão mantendo resolução,
+pix_fmt 8/10 bits e tags de cor; quando só a imagem muda, áudio/legendas/anexos são copiados sem perda; `inicio`/`fim`
+= só naquele trecho):
+- `efeito_visual(efeito, intensidade, inicio, fim)`: preto_e_branco, sepia, vinheta, negativo, desfoque, nitidez,
+  pixelar, desenho, contorno, granulado, filme_antigo, vhs, espelho, brilho_suave (+ apelidos: 'p&b', 'blur', 'cartoon'...).
+- `aplicar_lut(arquivo, intensidade, inicio, fim)`: .cube/.3dl/.dat/.m3d/.csp (`lut3d`) ou Hald CLUT (`haldclut`).
+- `chroma_key(cor=verde|azul|#RRGGBB|auto, fundo=imagem|vídeo|cor|transparente, similaridade, suavidade, remover_reflexo)`.
+- `sobrepor_video(arquivos, modo=pip|lado_a_lado|empilhado|grade, posicao, escala, inicio, fim, audio=principal|mixar|
+  sobreposto, volume, borda, cor_borda, cantos, ao_acabar=sumir|congelar|repetir|preto)`.
+- `zoom(modo=aproximar|punch|ken_burns|afastar, alvo, fator, inicio, fim, transicao_s, suave)`.
+- `fade_video(entrada_s, saida_s, cor, audio, inicio, fim)`; `desenhar(elementos=[caixa | barra_progresso | cronometro])`.
+- `melhorar_video(reduzir_ruido, nitidez, desentrelacar, deflicker, aumentar_resolucao, metodo_escala, inicio, fim)`;
+  `mudar_fps(fps, modo=duplicar|mesclar|interpolar)`; `cortar_bordas_pretas(limiar, manter_tamanho)`;
+  `remover_logo(retangulo, inicio, fim)`; `perspectiva(modo=corrigir|360, cantos, yaw, pitch, roll, fov, largura, altura)`.
+- Mudam a linha do tempo (limpam as marcas, devolvem `trecho_novo`): `inverter_video(modo=reverso|boomerang, inicio,
+  fim, audio)`, `repetir(vezes | duracao_alvo_s, inicio, fim)`, `camera_lenta_suave(fator, inicio, fim,
+  metodo=interpolar|mesclar|duplicar, audio=esticar|mudo)`.
+
+Canivete suíço de arquivos (`arquivos.py` + `mcp_arquivos.py`; só ffmpeg/exiftool/c2patool; o original nunca é tocado:
+ou VERSÃO por remux sem perda, ou ARQUIVO NOVO reservado com O_EXCL ao lado do original; `arquivo` = trabalhar num
+arquivo que não está na janela):
+- `extrair_quadros(modo=intervalo|cenas|tempos|todos, intervalo_s, tempos, formato=jpg|png|webp, largura, inicio, fim,
+  destino, maximo=300, limiar_cenas, arquivo)`: imagens numa PASTA NOVA `video.quadros/` (`quadro_0001_12.345s.jpg`).
+- `folha_contatos(colunas, linhas, largura, com_tempos, cabecalho, inicio, fim, formato, destino, arquivo)`: uma imagem
+  em grade (`video.folha.jpg`) com tempo em cada miniatura e cabeçalho técnico; devolve também a imagem ao Claude.
+- `capa(acao=extrair|definir|remover, tempo | arquivo_imagem, destino, arquivo)`: capa embutida (attached_pic; anexo
+  `cover.jpg` no MKV) de MP4/M4A/MOV/MP3/MKV/FLAC; definir/remover = versão sem reencodar; extrair = arquivo novo.
+- `video_de_imagens(imagens | pasta, duracao_cada_s, transicao=crossfade|fade|corte|<xfade>, duracao_transicao, audio,
+  resolucao, fundo=desfocado|recorte|<cor>, ken_burns, fps, destino, abrir_no_player)`: slideshow .mp4 NOVO.
+- `audio_para_video(estilo=ondas|espectro|barras|cqt|imagem, imagem, cor, fundo, resolucao, titulo_texto, faixa, destino,
+  arquivo, abrir_no_player)`: vídeo .mp4 NOVO a partir de áudio (AAC copiado).
+- `editar_metadados(titulo, artista, album, data, comentario, descricao, genero, idiomas={"A1":"pt"}, nomes_faixas,
+  remover=tudo|localizacao|camera|c2pa, arquivo)`: versão sem reencodar (vídeo/áudio por remux; fotos pelo exiftool);
+  confere com exiftool/c2patool e devolve o que havia e o que sobrou.
+- `converter_sem_perda(formato, audio_incompativel=erro|converter, destino, arquivo)`: troca de contêiner `-c copy`
+  (tabela de compatibilidade por contêiner; legenda de texto convertida; o que não cabe → erro sugerindo `exportar`).
+- `reparar_arquivo(formato, verificar, destino, arquivo)`: remux com `+genpts+igndts+discardcorrupt`, faststart;
+  MP4 sem moov → explica (untrunc); conta erros de decodificação antes/depois.
+- `rotacao_sem_perda(graus, absoluto, arquivo)`: só a matriz de exibição (MP4/MOV/MKV), versão.
+- `legenda_arquivo(acao=listar|extrair|converter|deslocar|remover, faixa_legenda, formato=srt|vtt|ass, deslocamento_s,
+  arquivo, destino)`: legendas como arquivos e faixas embutidas.
+- `comparar_qualidade(versao_a='original', versao_b='atual', inicio, duracao_s, metricas=auto|ssim|vmaf)`: VMAF (ffmpeg
+  do pacote) + SSIM + PSNR com pior momento e leitura em português.
+
 ### 2.3 Regras de versões
 - Cada edição grava `vNNN.ext` em `.<arquivo>.versoes/` ao lado do original, com `historico.json`.
 - **Salvar**: a última versão vira o original; o original vai para a Lixeira e as versões são apagadas.
@@ -251,13 +324,47 @@ de 50 ms do `astats` (`niveis_audio`, p10 = piso; fala = p80 das janelas acima d
   media 24 dB, forte sem limite). Encaixe verificado com um `deep-filter` falso (identidade): mesmo desvio que os
   outros métodos. **Pendente:** teste com o binário real (qualidade e velocidade) — a execução do binário baixado
   não foi autorizada na sessão automática.
-- [ ] Separar voz da música — **pendente, não baixado**. Demucs v4 (`htdemucs`, código e pesos MIT): exige PyTorch
-  (~700 MB–1 GB instalado) + modelo ~80 MB (`htdemucs_ft` ~320 MB); em CPU de notebook ~0,5–1× o tempo real e
-  2–4 GB de RAM em trechos longos (precisa `--segment`): pesado demais para o caminho principal e arriscado com
-  ~4 GB livres. Alternativa: modelos ONNX (htdemucs exportado, ou MDX-Net de voz ~30–60 MB; conferir a licença de
-  cada peso — os da comunidade UVR variam) no ONNX Runtime (MIT, ~50 MB) já previsto na Fase 7, processando em
-  blocos com sobreposição e como tarefa em segundo plano. Recomendação: fazer junto com a Fase 7 (mesmo ambiente de
-  IA sob demanda), saída como faixas novas A2 = voz, A3 = música (`nova_faixa`), reaproveitando o ducking.
+- [x] Separar voz, música e instrumentos (2026-11-10) — `separar.py` + `separar_audio`/`ver_espectro`, sem PyTorch:
+  Demucs v4 em ONNX Runtime (exports MIT do StemSplit, STFT dentro do grafo; tabela 5.2). Modos: `faixas` (A+1 "Voz" e
+  A+2 "Música (sem voz)", voz + música = original), `so_voz` ("tira a música de fundo"), `so_musica` (karaokê),
+  `instrumentos` (voz, bateria, baixo, outros; guitarra/violão e piano pelo htdemucs_6s; nomes em português), em faixas
+  novas e/ou arquivos `<nome>.voz.wav`... ao lado do vídeo (wav/flac/mp3/m4a/opus; nunca sobrescreve). Trecho
+  (inicio/fim): faixas novas com silêncio fora; `so_*` com o original fora (rampas de 20 ms). Tarefa em segundo plano
+  com progresso, cancelamento por bloco, `trava_ia` + trava do documento, pausa por memória.
+  - Qualidades: `rapida` (1 passada, sobreposição 25%), `alta` (padrão: + passada com a grade deslocada 0,5 s e os canais
+    trocados; instrumentos = os 4 especialistas do htdemucs_ft), `maxima` (4 passadas, sobreposição 50%, + htdemucs com
+    peso 0,5). `limpeza` = Wiener com todas as fontes (leve/media/forte; trecho mais forte com limpeza_inicio/fim).
+    `fala=True` (padrão em `so_voz`) = voz separada pelo DeepFilterNet (atenuação 24 dB), música = mistura − essa voz.
+  - Medidas (60 s, voz falada com liga/desliga 8 s/4 s; "vazamento" = energia da voz separada onde não há voz, em dB
+    relativos à voz; máquina com outro build rodando, carga 10–20, então tempos ~2–3× piores que com ela livre):
+
+    | Teste | Qualidade | Limpeza | SI-SDR voz | Vazamento | × tempo real | Pico RAM |
+    |---|---|---|---|---|---|---|
+    | sintetizador agudo + bateria (fácil; mistura: 3,3 dB / −5,1 dB) | rápida | não | 26,4 dB | −56,5 dB | 1,6–4,1 | 1,7 GB |
+    | | rápida | leve / média / forte | 21,9 / 22,6 / 21,0 | −62 / −70 / −77 | +2 s | |
+    | | alta | não / média | 26,6 / 22,6 | −56,7 / −70,0 | 3,0 | |
+    | | máxima | não / média | 26,7 / 22,7 | −57,7 / −71,1 | 13,7 | 2,1 GB |
+    | | rápida + DeepFilterNet (24 dB) | — | 22,9 | −67,2 | +~0,3 | |
+    | lead de sintetizador "vocal" (vibrato, formantes) 3 dB acima da voz (difícil; mistura: −4,7 dB / +3,1 dB) | rápida | não / média / forte | 6,2 / 5,6 / 5,8 | −4,9 / −4,4 / −5,0 | 1,7 | |
+    | | alta | não / forte | 7,5 / 7,5 | −6,5 / −7,3 | 2,9 | 1,8 GB |
+    | | rápida + DeepFilterNet (24 dB / sem limite / 12 dB) | — | 15,6 / 15,7 / 13,8 | −20,5 / −21,5 / −15,4 | | |
+    | | alta + DeepFilterNet (24 dB) | — | 15,4 | −19,4 | | |
+
+    Ponta a ponta: 131 s em `faixas` rápida = 1,03× o tempo real (pico 1,69 GB); voz 19,0 dB e música 18,3 dB de SI-SDR
+    (mistura 0 dB). `so_voz` rápida + fala num trecho 10–50 s da mistura difícil: 14,9 dB dentro (mistura −5,2 dB),
+    fora do trecho = original (diferença só do AAC, 30 dB). 6 fontes em arquivos (flac): voz 18,0 dB, arquivo na
+    amostra certa (atraso 0); a soma das 6 fontes fica a 22 dB da mistura (o Demucs não garante soma exata).
+  - Padrões escolhidos pelos números: `limpeza='nao'` (Wiener tira vazamento já inaudível e custa ~4 dB; não tira o
+    que a rede acha que é voz), `fala=True` só em `so_voz` (DeepFilterNet é IA de FALA: em canto pode cortar notas
+    longas; nos outros modos o Claude liga quando é fala), `qualidade='alta'` (+1,3 dB e −1,6 dB de vazamento no caso
+    difícil por ~2× o tempo); `maxima` quase igual à alta por ~2–4× o tempo: só quando pedirem o melhor possível.
+  - Sincronia: amostra a amostra até a faixa nova (conferido em PCM/WAV e nos arquivos exportados). Reencodar a faixa
+    em AAC desloca 16 (MKV, arredondamento de ms) a 32 (MP4) amostras — igual a qualquer reencode do ffmpeg, medido
+    num controle sem separação.
+  - Limitações: a rede só separa o que reconhece: instrumento com timbre de voz (lead "vocal") vaza na voz — em fala
+    o DeepFilterNet resolve; em canto, sem modelo melhor de licença limpa (ver decisão), só passadas extras ajudam
+    pouco. Guitarra/piano do htdemucs_6s são fracos (o próprio Demucs avisa: piano com artefatos). Entrada fixa de
+    7,8 s por bloco; ~1,4–2,1 GB de RAM. 5.1 é separado em estéreo (avisa).
 - Limitações: o ducking é aproximado (detector RMS do compressor; ~1 dB a menos que o pedido) e não distingue voz
   de outros sons na faixa; a redução com `afftdn` só pega ruído estacionário (não tira cliques, vozes de fundo ou
   ruído que muda); `enable` num trecho liga/desliga o filtro sem transição; `remover_silencios` descarta legendas
@@ -293,6 +400,48 @@ de 50 ms do `astats` (`niveis_audio`, p10 = piso; fala = p80 das janelas acima d
   - `.m4a` continua `.m4a` ao ganhar faixa (MP4 aceita várias); wav/mp3/flac/ogg/opus/aac → `.mka`.
   - Áudio todo em silêncio → erro claro (antes `concat=n=0`); erro "nenhum silêncio" sugere limiar = atual + 10 dB
     (e duracao_min_s/2) e mostra o limiar usado. MCP: `inicio`/`fim`/`musica_inicio` aceitam número (`str | float`).
+
+### Canivete suíço — áudio
+Pedido: quase qualquer edição de áudio pedindo à IA, só com o ffmpeg (nada online, nada baixado). Lógica em
+`efeitos_audio.py` (sem Qt), ferramentas em `mcp_audio.py`. Todas criam versão pelo `_editar_audio` (vídeo e faixas
+não escolhidas copiados — md5 iguais em todos os testes), aceitam `faixa` e (quase todas) `inicio`/`fim`.
+Sincronia: a latência de cada cadeia é MEDIDA (clique; envelope de ruído para pitch/fase aleatória) e compensada;
+start_time e duração da faixa mantidos. Testado em ffmpeg 6.1 (sistema) e 8.1 (o do AppImage); filtro que falta → erro
+claro citando `AI_EDITOR_FFMPEG`/`--diagnostico`.
+- [x] `equalizar`: 13 presets + graves/médios/agudos + bandas livres (biquads, latência 0; limitador se algum ganho > 0).
+  Atraso medido: voz −1 amostra, graves +8 dB 1 amostra; trecho 3–7 s −38 (deslocamento normal do AAC).
+- [x] `efeito_voz`: eco, reverb/banheiro/caverna/estádio (IR sintética + `afir`, latência 0, cauda dentro da duração),
+  robô (`afftfilt`, 384 amostras compensadas), telefone, rádio, megafone, esquilo/monstro (rubberband), sussurro,
+  subaquático. Atraso: eco/reverb/estádio/banheiro/caverna 0; robô ≤ 6 amostras (envelope); filtros de banda 20–75
+  amostras (≤ 1,6 ms, atraso de grupo dos IIR); esquilo/monstro/sussurro 26–97 amostras de envelope (≤ 2 ms).
+- [x] `mudar_tom` (rubberband com `pitchq=quality`, formantes opcionais; sem rubberband, asetrate+atempo):
+  +4 st: 39–53 amostras de envelope; −5 st com formantes: 84–87; só no trecho 4–8 s: 0.
+- [x] `dinamica_audio`: nivelar_fala (speechnorm), nivelar_suave (dynaudnorm), compressor, limitador, de-esser, gate
+  (limiar pelo piso medido), remover_cliques (adeclick), remover_distorcao (adeclip). Atraso 0 em todos (cliques −41 = AAC).
+- [x] `canais_audio`: mono, estéreo, trocar, só L/R, separar (L e R em duas faixas), ampliar/estreitar, realçar centro
+  (dialoguenhance, 32 ms compensados), remover centro (karaokê simples), inverter fase. Atraso 0.
+- [x] `sincronizar_audio`: +120 ms → 5722 amostras a 48 kHz (5760 − 38 do AAC); −80 ms → −3840 exatas (8.1) /
+  −3824 (6.1); duração mantida. Reencoda só aquela faixa (o `-itsoffset` sem perda dava 0,178 em vez de 0,2 no MP4
+  pelo priming do AAC, e no MKV deslocava o vídeo).
+- [x] `censurar_palavras`: whisper local (`fala.transcrever`/`buscar_fala`) + bipe 1 kHz −12 dB (ou silêncio) com
+  rampas de 5 ms, margem 60 ms; também aceita `trechos` manuais. Teste em fala real: "vídeo" 6,675–6,925 (whisper
+  6,76–6,90), "processador" 11,325–11,962, "obrigado" 18,265–18,645, manual 19,0–19,2 → bipes detectados em 6,68–6,92,
+  11,33–11,96, 18,27–18,64, 19,0–19,2; palavra inexistente → aviso; fora dos trechos idêntico (corr 0,99997, atraso 0).
+- [x] `normalizar_volume` (EBU R128): ganho exato + limitador de pico verdadeiro (4× sobreamostragem) só se precisar;
+  mede antes/depois. youtube: −16,21 → **−14,01 LUFS**, TP −3,21 → −1,48; tv (131 s): −16,69 → **−23,00**, TP −8,91.
+- [x] `inverter_audio`: trecho 4–6 s idêntico ao original invertido (corr 0,9996, −38 amostras do AAC); faixa inteira
+  limitada a ~400 MB de áudio decodificado (o `areverse` guarda tudo na memória).
+- [x] `mixar_faixas`: soma faixas do arquivo (cada uma no seu start_time, upmix mono→estéreo, limitador) numa faixa nova
+  ou no lugar da 1ª citada; mistura nova idêntica no tempo (atraso 0).
+- [ ] `gerar_audio` (tons/ruído/silêncio inseridos): não feito — o bipe da censura cobre o caso comum e inserir
+  silêncio muda a linha do tempo (é `velocidade_trecho`/`congelar_quadro`/montagem).
+- Limitações: efeitos com filtros IIR (telefone, rádio, megafone) ficam ≤ 1,6 ms atrás (fase, não latência);
+  pitch ≤ 2 ms de envelope; reencodar em AAC desloca ~38 amostras (como qualquer reencode); efeitos com cauda são
+  cortados no fim da faixa; `nivelar_fala` sobe o ruído das pausas (sugerir `reduzir_ruido` antes); ganho enorme
+  (+35 dB, −9 LUFS em cliques) termina com TP +2 dBTP depois do AAC → aviso na resposta; MKV com faixa de start
+  negativo (−0,021, priming): o `_editar_audio` desloca o vídeo +21 ms junto com as faixas copiadas (relação A/V
+  preservada em ffmpeg; afeta qualquer edição de áudio, não só estas); faixa inteira invertida fica a ~10–20 ms
+  (preenchimento do AAC no fim, irrelevante para áudio ao contrário).
 
 ### Fase 5 — Montagem e análise
 Só com o ffmpeg. Código em `core.py`, seção "montagem (Fase 5)"; ferramentas MCP `juntar_arquivos`, `dividir`,
@@ -455,8 +604,8 @@ Módulo `src/ai_editor/fala.py` (sem Qt); ferramentas MCP na seção "fala (Fase
     `uvx --from cmake==4.4.4`. `modelo_pronto` confere o SHA-256 uma vez e grava `.ggml-*.bin.ok` (tamanho+mtime).
 - Limitações: testado só com fala sintética (piper, voz pt_BR faber) e a amostra jfk.wav (inglês); sem diarização
   (quem fala); VAD do whisper.cpp (Silero) avaliado e não usado (os tempos de token/DTW não são remapeados com VAD).
-  O binário é compilado com `GGML_NATIVE` (otimizado para a CPU local): para o AppImage, compilar sem nativo ou
-  distribuir o fonte+receita.
+  Do código-fonte, o binário é compilado com `GGML_NATIVE` (otimizado para a CPU local). No AppImage ele já vem
+  pronto e portátil (ver Fase 8).
 
 ### Fase 7 — Objetos: destacar e remover (IA local)
 Fluxo: o Claude localiza o objeto nos quadros (`ver_quadros`) → `segmentar_objeto` (rastreia e devolve quadros de
@@ -603,8 +752,129 @@ conferência) → confirma/`ajustar_mascara` → `remover_objeto` / `fundo_objet
   de cada pacote do Ubuntu e `ffmpeg/BIBLIOTECAS.tsv` (repositório + commit de cada biblioteca da receita BtbN).
   Releases devem sair do CI: na máquina local alguns pacotes são
   versões ESM (Ubuntu Pro), cujo fonte não é público no Launchpad.
+- [x] AppImage autossuficiente para as IAs (2026-11-10):
+  - **ONNX Runtime 1.31.1** (+ flatbuffers, protobuf, packaging; numpy já ia) embutido: o build faz
+    `uv sync --frozen --extra ia` (versões e hashes do `uv.lock`) e o PyInstaller recolhe o `onnxruntime`
+    (`--hidden-import` + hook do pyinstaller-hooks-contrib). Licenças em `usr/share/doc/ai-editor/python/<pacote>/`
+    (inclui `ThirdPartyNotices.txt`). No AppImage a dica `uv sync --extra ia` nunca aparece (`objetos._dica_ia`).
+    `--diagnostico` ganhou a seção "módulos Python (IA)" que importa de verdade o onnxruntime (`[pacote]`).
+  - **whisper-cli portátil** (whisper.cpp v1.9.5, tarball SHA-256 também no `packaging/SHA256SUMS`) compilado pelo
+    build (`python -m ai_editor.fala --compilar-portatil`): `GGML_NATIVE=OFF`, `GGML_BACKEND_DL=ON`,
+    `GGML_CPU_ALL_VARIANTS=ON`, `BUILD_SHARED_LIBS=ON`, RPATH `$ORIGIN`; em `usr/lib/whisper/` (link `usr/bin/whisper-cli`,
+    origem `[pacote]`): executável + libwhisper/libggml/libggml-base + 14 variantes `libggml-cpu-*.so` (x64, sse42,
+    sandybridge, ivybridge, piledriver, haswell, skylakex, cannonlake, cascadelake, icelake, cooperlake, zen4, alderlake,
+    sapphirerapids), ~20 MB descomprimido. Depende só de libc/libm/libstdc++/libgcc_s (o build confere NEEDED, RPATH e
+    `ldd`). Nesta máquina carrega a variante haswell: transcrição de 16 s em 3,2 s (nativo: 2,7 s). Compilação ~6,5 min
+    com `-j4` (pico de RAM ok), em cache em `$BUILD/whisper-portatil-<chave>`. Licença MIT em
+    `usr/share/doc/ai-editor/whisper.cpp/`. `_rodar_whisper` roda com `cwd` = pasta do executável (a ggml também
+    procura variantes na pasta atual).
+  - CI (`release.yml`): `build-essential cmake binutils` no apt; os testes exigem `whisper-cli` e `onnxruntime` com
+    `[pacote]` no `--diagnostico`, a licença do whisper.cpp e as variantes da CPU.
+  - **Nada é baixado ao rodar o AppImage** (pedido do usuário, 2026-11-10; tamanho aceito ~1,5–2 GB):
+    `deep-filter` 0.5.6 (binário musl oficial, SHA-256 do `deepfilter.py` repetido no `SHA256SUMS`, licenças MIT/Apache
+    da tag) em `usr/bin` (`[pacote]`); modelos em `usr/share/ai-editor/modelos/<nome>/` com a mesma estrutura de
+    `~/.local/share/ai-editor/modelos`: Whisper **small** (488 MB), SAM 2.1 tiny (156 MB), LaMa (93 MB) e os modelos
+    `"embutir": True` do `separar.MODELOS` (htdemucs_ft voz/bateria/baixo/outros 4×166 MB, htdemucs 166 MB,
+    htdemucs_6s 136 MB) — 1,7 GB. `packaging/modelos.py` baixa com o próprio código do app (XDG_DATA_HOME = cache do
+    build, `~/.cache/ai-editor-build/modelos-cache`; no CI, `actions/cache` com chave nos hashes fixados) e confere o
+    SHA-256 completo de novo ao copiar. Busca: `binarios.pastas_modelos()`/`caminho_modelo()` olham o pacote primeiro
+    (somente leitura; `modelo_embutido` → só confere o tamanho) e depois a pasta do usuário; `downloads_permitidos()`
+    é False empacotado (`AI_EDITOR_PERMITIR_DOWNLOADS=1` reabilita para testes): pedir um modelo que não veio dá erro
+    claro em vez de baixar. Fala: `fala.modelo_padrao()` = 'small' se disponível, senão 'base' (`modelo=None`/'padrao').
+    `--diagnostico` lista os modelos embutidos com tamanho.
+  - **Tamanhos**: antes 244,5 MB → com ONNX Runtime + whisper-cli portátil 260,9 MB (+16,4) → com deep-filter e os
+    modelos sem o htdemucs 1613 MB → FINAL: **1753 MB (1,63 GiB)** (AppDir ~2,4 GB; zstd 19 em blocos de 1 MiB; os pesos ONNX
+    fp16/ggml comprimem ~12%). Abaixo do limite de 2 GiB por arquivo da Release do GitHub (o CI falha acima de
+    ~1,9 GiB). zsync ~3 MB.
 - [ ] Testar numa sessão Wayland real.
 - [ ] Reduzir mais: compilar a libmpv contra as libav* do build do BtbN (eliminaria a segunda cópia do ffmpeg, ~70 MB).
+
+### Canivete suíço — vídeo (`efeitos_video.py` + `mcp_video.py`)
+Pedido: quase qualquer edição de vídeo pedindo à IA, só com o ffmpeg. Todas criam versão (resolução, pix_fmt 8/10 bits
+e tags de cor mantidos — origem HEVC 10 bits PQ/BT.2020 sai HEVC 10 bits com as mesmas tags; SAR ≠ 1 normalizado como
+na Fase 3). Só a imagem mudando → áudio/legendas/anexos copiados sem perda; linha do tempo mudando → segmentos de
+QUADROS (mesma técnica do `velocidade_trecho`: `-ss` ¼ de quadro antes, `trim` por nº de quadros, áudio com duração
+exata por segmento, concats de vídeo e áudio separados). Efeitos em janela: `split` + `blend` com o original por
+`enable` (fora da janela o quadro passa intacto). Testado no ffmpeg 6.1 (sistema) e 8.1 (pacote); filtro que falta →
+erro claro em português.
+- [x] `efeito_visual`: 14 efeitos (P&B, sépia, vinheta, negativo, desfoque, nitidez CAS+unsharp, pixelar, desenho
+  `edgedetect`+`erosion`, contorno multiply, granulado, filme antigo, VHS, espelho, brilho suave por `screen`), todos com
+  janela [1,5] num vídeo de 6 s: 180 quadros, 6,000 s, quadros fora da janela iguais ao original.
+- [x] `aplicar_lut`: `lut3d` (.cube testado) e `haldclut` (Hald 512×512 a 50% numa janela, 8.1); imagem que não é Hald
+  (lado ≠ N³) → erro claro.
+- [x] `chroma_key`: cor da tela amostrada nas bordas (verde → 0x00AF3E medido), `chromakey` + `despill`; fundo imagem,
+  vídeo (repete com `-stream_loop`, cobre o quadro), cor, ou transparente (.webm VP9 `yuva420p`, `alpha_mode=1`
+  conferido; reaproveitado como PiP com alfa por cima de outro vídeo).
+- [x] `sobrepor_video`: PiP com borda, cantos arredondados (`geq` no alfa), janela, `ao_acabar`; tela dividida
+  `hstack`/`vstack`/`xstack` (lado a lado 1686x720, empilhado 640x840, grade de 4); áudio principal/mixar/sobreposto
+  (`amix normalize=0` + limitador; mono duplicado com `pan` — o upmix do `aresample` perdia 3 dB). Imagem também vale.
+- [x] `zoom`: `perspective` com expressões por quadro (subpixel). Tremor medido 0,022 contra 0,339 do `zoompan`.
+  Modos aproximar, punch, ken_burns, afastar; alvo por nome, ponto ou retângulo.
+- [x] `inverter_video` (reverso/boomerang) e `repetir` (vezes/duração alvo): ordem conferida pelo contador do
+  testsrc; áudio invertido com correlação 0,99998 com o original invertido. `reverse`/`loop` guardam quadros crus
+  (288 quadros 720p ≈ 836 MB): até o orçamento (≤ 300 MB ou 1/8 da memória livre) numa passada; acima disso, 2 passadas
+  — cada pedaço vira um intermediário sem perda FFV1+FLAC (um comando por vez) e o concat demuxer os lê como uma
+  entrada só. 20 s 720p inteiro invertido: pico 1,15 GB (pedaços num comando só) → **364 MB**, 20,000 s/600 quadros;
+  repetir 10 s até 25 s: 35,000 s, pico 312 MB; pasta temporária `inverter-*`/`repetir-*` apagada no fim.
+  Trecho mudo (`audio=False`): −91 dB dentro, −16 dB fora.
+- [x] `camera_lenta_suave`: `minterpolate` (mci/aobmc/bidir) ou `framerate` (mesclar); áudio por `atempo` ou mudo.
+  2 s a ×0,4 num vídeo de 20 s → 23,000 s/690 quadros.
+- [x] `fade_video`: `fade` + `afade` por faixa; meio da rampa = luma 67,8 entre 16 e 118 e −6 dB no áudio.
+- [x] `desenhar`: caixa (`drawbox`), barra de progresso (fonte `color` deslizando por `overlay` com expressão), cronômetro
+  (`drawtext` `%{eif}`: crescente, regressivo, relógio; mm:ss, hh:mm:ss, ss, ss.d, mm:ss.cc) — regressiva de 10 s a
+  partir de 1 s mostra 8.5 em 2,5 s e 6.1 em 4,9 s.
+- [x] `melhorar_video`: `bwdif` (com `idet` em 'auto'), `deflicker`, `hqdn3d`/`nlmeans`, escala lanczos/bicubic/spline/
+  pixel/`xbr` (1280x720 → 1920x1080 em 10 bits; xbr 2× → 2560x1440), `cas`.
+- [x] `mudar_fps`: duplicar/mesclar/interpolar com nº de quadros exato (30→60: 360; 30→25: 150; 30→24: 144 nos dois
+  ffmpegs — o 6.1 duplicava 1 quadro no fim e o 8.1 perdia 1 com `framerate`; corrigido com `fps`+`tpad`+`trim`).
+- [x] `cortar_bordas_pretas`: `cropdetect` em 8 pontos, união das caixas; tarja 140/80 px → 1000x560 exato (também com
+  `manter_tamanho`); vídeo anamórfico recortado na geometria exibida.
+- [x] `remover_logo` (`delogo`, mantido ≥ 1 px longe das bordas) e `perspectiva` (corrigir 4 cantos com `perspective`;
+  360° equirretangular → vista plana com `v360`).
+- Limitações: `minterpolate` é muito lento (30 fps → 29,97 em 20 s 720p levou 494 s; câmera lenta interpolada de 2 s:
+  97 s) e deforma bordas rápidas (avisado; 'mesclar' é a saída rápida); `chroma_key` transparente gera versão .webm e
+  qualquer edição seguinte em .webm volta a yuv420p (perde o alfa: exportar antes); `remover_logo` só logo fixo
+  (borra; objetos em movimento → `remover_objeto`); `aumentar_resolucao` só no vídeo todo e sem IA; inverter/repetir
+  descartam legendas e capítulos (avisam) e o intermediário FFV1 ocupa disco (~centenas de MB por minuto em 720p);
+  boomerang de áudio fica ~16 ms mais longo que o vídeo no fim (preenchimento do AAC); filtros que trabalham em 8 bits
+  (noise, eq) avisam de banding em origem de 10 bits.
+
+### Canivete suíço — arquivos (`arquivos.py` + `mcp_arquivos.py`)
+- [x] `extrair_quadros`: intervalo numa passada só (`select` sobre `floor(t/P)` + `metadata=print` para o tempo exato de
+  cada quadro), cenas via `detectar_cenas` (quadro 0,25 s depois do corte), tempos/fim do vídeo (sem quadro depois de t →
+  último quadro decodificado), limite `maximo` com estimativa no erro. Testado: 8 imagens a cada 2,5 s em 20 s; 30 webp em
+  1 s; 3 cenas num vídeo com 2 cortes.
+- [x] `folha_contatos`: miniaturas extraídas por busca (uma por vez, pouca memória) + `tile` + cabeçalho `drawtext`.
+- [x] `capa`: MP4/M4A/MOV/MP3 (`-disposition attached_pic`; ID3v2.3 com "Cover (front)"), FLAC, MKV/MKA (`-attach`
+  `cover.jpg` com mimetype). Imagem que não é JPEG/PNG ou > 1920 px vira JPEG. Conferido por novo ffprobe.
+- [x] `video_de_imagens`: cada foto normalizada uma vez para W×H (fundo desfocado/recorte/cor; EXIF Orientation respeitada
+  pelo ffmpeg), segmentos com no máximo 2 entradas (xfade da foto i para a i+1 no fim do segmento i) e `concat -c copy`:
+  memória constante com centenas de fotos. Número de quadros exato (testado 168/200/90 quadros = soma esperada).
+  Ken Burns = `zoompan` sobre a foto ampliada 2× (contínuo entre segmentos, alternando aproximar/afastar).
+- [x] `audio_para_video`: showwaves/showspectrum/showfreqs/showcqt sobre cor ou foto desfocada; estilo imagem com
+  `-tune stillimage`; título com `drawtext`.
+- [x] `editar_metadados`: remux com `-metadata chave=` só nas chaves da categoria (localização: location/ISO6709/xyz;
+  câmera: make/model/software/serial/lens/com.apple.*/com.android.*), `-movflags use_metadata_tags` para não perder as
+  outras chaves `mdta`; `tudo` = `-map_metadata -1` + `bitexact` (idioma/nome das faixas mantidos). Depois o exiftool
+  apaga o que sobrou (XMP, UserData) e reconfere. Fotos: exiftool (`-GPS:all=`, tags de câmera, `-all=` mantendo ICC e
+  Orientation, `-JUMBF:all=` para C2PA). Testado com JPG/MP4 com GPS e câmera falsos (exiftool) e JPG/MP4 assinados com o
+  certificado de teste do c2patool: GPS/câmera/C2PA somem; o original continua intacto.
+- [x] `converter_sem_perda` / `reparar_arquivo` (MP4 sem moov → mensagem do untrunc; TS cortado e MP4 com 60 kB
+  corrompidos recuperados por remux; erros de decodificação contados antes/depois).
+- [x] `rotacao_sem_perda`: `-display_rotation` (horário do usuário → anti-horário da matriz), conferido relendo o
+  arquivo; MP4/MOV/MKV (WebM recusado).
+- [x] `legenda_arquivo`: extrair (texto → srt/vtt/ass; PGS → .sup; DVD/DVB → .mks), converter (CP1252 detectado),
+  deslocar (arquivo externo → arquivo novo; faixa embutida → versão com a faixa trocada no lugar, mesmos idioma/título/
+  disposição), remover.
+- [x] `comparar_qualidade`: VMAF (libvmaf do ffmpeg 8.1 do pacote, `n_subsample` em vídeos longos), SSIM e PSNR com
+  `stats_file`, comparado redimensionado/convertido para a referência; aviso quando os vídeos nem se parecem.
+- Tudo testado no ffmpeg 8.1 do pacote e no 6.1 do sistema (no 6.1 só não há VMAF: `metricas='auto'` cai para SSIM/PSNR
+  com aviso).
+- Limitações: MP4 truncado sem moov não é recuperado (untrunc não entra); remux regrava o arquivo e por isso invalida
+  manifesto C2PA (avisado); XMP e caixas proprietárias (`uuid`, telemetria GoPro/DJI) não sobrevivem ao remux de
+  MP4/MOV (mais privacidade, menos fidelidade); `rotacao_sem_perda` depende do player respeitar a matriz; legendas de
+  imagem não podem ser deslocadas; `espectro` rola devagar em resoluções largas (uma coluna por bloco de FFT);
+  `comparar_qualidade` compara quadro a quadro desde o início (não alinha vídeos cortados).
 
 ### Depois
 - [ ] Outras plataformas (Windows/macOS) — a render API já ajuda.
@@ -629,6 +899,10 @@ Decidido em 2026-11-09. Registro em `src/ai_editor/binarios.py` (`REGISTRO` e `R
 ### 5.1 Embutido no pacote (offline desde o primeiro uso)
 | Ferramenta | Para quê | Licença | Tamanho aprox. |
 |---|---|---|---|
+| ONNX Runtime 1.31.1 (+ flatbuffers, protobuf; versões do `uv.lock`, extra `ia`) | motor das IAs (objetos, separação) | MIT | ~30 MB |
+| whisper-cli portátil (whisper.cpp v1.9.5 + ggml, 14 variantes de CPU) | legendas/transcrição | MIT | ~20 MB |
+| deep-filter (DeepFilterNet 0.5.6) | redução de ruído com IA | MIT/Apache-2.0 | 36 MB |
+| Modelos: Whisper small, SAM 2.1 tiny, LaMa, Demucs (htdemucs, htdemucs_ft ×4, htdemucs_6s) | IAs locais | MIT / Apache-2.0 | ~1,7 GB |
 | ffmpeg + ffprobe (build GPL "shared" do FFmpeg-Builds n8.1.3, release `autobuild-2026-11-09-12-42`, isolado em `usr/lib/ffmpeg`) | edições, análise, exportação. Precisa de: libx264, libvpx-vp9, libopus, aac. Desejável: libx265, libsvtav1, libmp3lame, prores_ks, libass (`subtitles`), rubberband, arnndn | GPL-3.0 | ~220 MB descomp. |
 | libmpv + dependências | reprodução com aceleração por hardware | GPL/LGPL | ~40 MB |
 | mediainfo | metadados detalhados | BSD-2 | ~10 MB |
@@ -638,18 +912,18 @@ Decidido em 2026-11-09. Registro em `src/ai_editor/binarios.py` (`REGISTRO` e `R
 | modelo RNNoise | `reduzir_ruido(metodo='rnnoise')` — ponto de extensão; ainda não embutido (o código usa o primeiro `~/.local/share/ai-editor/modelos/rnnoise/*.rnnn`) | BSD | < 1 MB |
 | Python + PySide6 (só módulos usados), python-mpv, numpy, qtawesome, mcp | o app | LGPL/MIT/BSD | ~120 MB |
 
-Meta: AppImage comprimido com ~150–250 MB. Obtido: **233 MB** (164 MB com `FFMPEG_ORIGEM=sistema`).
+Meta original: ~150–250 MB (obtido 233 MB, depois 244,5 MB). Desde 2026-11-10 tudo vai embutido, sem downloads:
+**1753 MB (1,63 GiB)** (limite: 2 GiB por arquivo na Release do GitHub).
 
-### 5.2 Sob demanda (baixado no primeiro uso, com confirmação e tamanho)
+### 5.2 Sob demanda — SÓ rodando do código-fonte (o AppImage traz tudo da 5.1 e não baixa nada)
 Destino: `~/.local/share/ai-editor/bin` e `~/.local/share/ai-editor/modelos`.
 | Ferramenta | Para quê | Licença | Tamanho |
 |---|---|---|---|
-| ONNX Runtime 1.31 (pip, extra `[ia]`; deps flatbuffers Apache-2.0, protobuf BSD-3) | motor das IAs no processador | MIT | ~50 MB |
 | SAM 2.1 tiny (`onnx-community/sam2.1-hiera-tiny-ONNX` @ `814a066`, fp32; `small` opcional @ `a7df49d`, 184 MB) | segmentar/rastrear objetos (Fase 7) | Apache-2.0 (pesos da Meta; o repo ONNX não declara licença própria — conversão herda a Apache-2.0) | 156 MB |
 | LaMa (`opencv/inpainting_lama` @ `aee6d22`, `inpainting_lama_2025jan.onnx`; derivado do `Carve/LaMa-ONNX`) | preencher fundo removido (Fase 7) | Apache-2.0 (LICENSE no repo) | 93 MB |
-| whisper.cpp v1.9.5 (`whisper-cli`, compilado do fonte: tarball SHA-256 `ff1a9053…dc1720`) + modelos ggml tiny/base/small (HF `ggerganov/whisper.cpp` @ `5359861c`, SHA-256 fixados em `fala.MODELOS`) | legendas/transcrição (Fase 6) | MIT (código e modelos) | 3,2 MB + 78/148/488 MB (q5_1: 60/190 MB) |
-| DeepFilterNet 0.5.6 (`deep-filter` x86_64 musl, release do GitHub, SHA-256 `70775e25…72ef7da`, modelo DeepFilterNet3 embutido) | redução de ruído com IA (`metodo='deepfilternet'`) | MIT OR Apache-2.0 | 35 MB (sob demanda) |
-| Demucs (opcional) | separar voz e música | MIT | ~300 MB |
+| whisper.cpp v1.9.5 (`whisper-cli` do código-fonte: tarball SHA-256 `ff1a9053…dc1720`; no AppImage já vem pronto, ver 5.1) + modelos ggml tiny/base/small (HF `ggerganov/whisper.cpp` @ `5359861c`, SHA-256 fixados em `fala.MODELOS`) | legendas/transcrição (Fase 6) | MIT (código e modelos) | 3,2 MB + 78/148/488 MB (q5_1: 60/190 MB) |
+| DeepFilterNet 0.5.6 (`deep-filter` x86_64 musl, release do GitHub, SHA-256 `70775e25…72ef7da`, modelo DeepFilterNet3 embutido) | redução de ruído com IA (`metodo='deepfilternet'`) | MIT OR Apache-2.0 | 35 MB (sob demanda só do código-fonte; no AppImage vem embutido) |
+| Demucs v4 em ONNX (StemSplit, pesos fp16; **embutidos no AppImage**, `"embutir": True` em `separar.MODELOS`; download fixado só do código-fonte): `htdemucs-ft-voz` = `StemSplitio/htdemucs-ft-vocals-onnx` @ `2ef0d757`; `htdemucs-ft-bateria`/`-baixo`/`-outros` = `StemSplitio/htdemucs-ft-onnx` @ `8616370e`; `htdemucs` = `StemSplitio/htdemucs-onnx` @ `d54ed9eb`; `htdemucs-6s` = `StemSplitio/htdemucs-6s-onnx` @ `49df9b69` (SHA-256 em `separar.MODELOS`) | separar voz, música e instrumentos (`separar_audio`) | MIT (código e pesos Demucs, Meta; repos ONNX MIT) | 166 MB cada (6s: 136 MB); total 966 MB |
 
 ### 5.3 Eliminados
 - `gio trash` → `lixeira.py` (padrão freedesktop, inclusive lixeira de outros discos).
@@ -662,8 +936,8 @@ GitHub Actions. Não usamos linuxdeploy: as dependências são resolvidas com `l
 ### 5.5 A confirmar
 - ~~Se os builds estáticos do ffmpeg 8 trazem o filtro `whisper`~~ — **não**: o FFmpeg-Builds (BtbN) usa `--disable-whisper`
   (verificado em 2026-11-10 no n8.1). Transcrição continua via whisper.cpp sob demanda.
-- Distribuir o `whisper-cli` pronto (build portátil sem `GGML_NATIVE`, com `GGML_CPU_ALL_VARIANTS`) em vez de compilar na
-  máquina do usuário (hoje exige g++/make e cmake ou uv). Por ora: compilação local, sem sudo, ~80 s.
+- ~~Distribuir o `whisper-cli` pronto~~ — **feito** (2026-11-10): o AppImage traz o build portátil
+  (`GGML_CPU_ALL_VARIANTS`); compilação local fica só para quem roda do código-fonte.
 - VAD Silero do whisper.cpp (`ggml-silero-v6.2.0.bin`, 0,9 MB, MIT) para áudio longo com muita música/silêncio: precisa
   remapear os tempos de token/DTW (o whisper-cli só remapeia os segmentos).
 
@@ -680,8 +954,10 @@ Projeto: **GPL-3.0**.
 | QtAwesome (+ Phosphor, MDI) | MIT / fontes MIT, Apache | ok |
 | mcp SDK, numpy | MIT / BSD | ok |
 | SAM 2.1 (pesos; export ONNX onnx-community) | Apache-2.0 | ok com GPL-3.0; baixado sob demanda, não vai no pacote |
-| ONNX Runtime (+ flatbuffers, protobuf) | MIT (+ Apache-2.0, BSD-3) | ok; dependência opcional (extra `ia`) |
+| ONNX Runtime (+ flatbuffers, protobuf) | MIT (+ Apache-2.0, BSD-3) | ok; extra `ia` no código-fonte, embutido no AppImage |
+| whisper.cpp / ggml (`whisper-cli` portátil) | MIT | no AppImage (compilado do fonte no build) |
 | LaMa (ONNX do opencv_zoo) | Apache-2.0 | ok com GPL-3.0; baixado sob demanda |
+| Demucs v4 (htdemucs, htdemucs_ft, htdemucs_6s; ONNX do StemSplit) | MIT | ok; embutido no AppImage (966 MB descomp.) |
 | ProPainter | NTU S-Lab 1.0 (não comercial) | **evitar no pacote**; no máximo opcional |
 | mediainfo (+ libmediainfo, libzen) | BSD-2-Clause | no AppImage, do Ubuntu |
 | exiftool | Artistic / GPL-1.0+ | no AppImage (código Perl) |
@@ -704,6 +980,15 @@ Lista completa e links de código-fonte: `packaging/LICENCAS_TERCEIROS.md` e `CO
 
 - 2026-11-10: Fase 7 com SAM 2.1 só de imagem + rastreamento quadro a quadro (sem a memória de vídeo do SAM 2, ausente nos exports ONNX confiáveis); remoção padrão por "fundo visto mais recente" + LaMa uma vez (câmera parada), LaMa por quadro só para câmera em movimento; máscaras no cache, fora de `.versoes/`; ferramentas longas viram tarefas após 50 s de espera.
 - 2026-11-10: revisão da Fase 7 — versões sobrepõem só o trecho processado ao vídeo original (overlay em yuv nativo) em vez de passar tudo por RGB; trava `.versoes/.trava` checada pelo `core` em registrar/desfazer/descartar/salvar; máscara com procedência da fonte (linha do tempo diferente = erro); uma taxa por vídeo também em VFR; segmentar o vídeo todo acima de 300 quadros exige `confirmar=True`.
+- 2026-11-10: o AppImage é autossuficiente e não baixa nada ao rodar: motores (ONNX Runtime, whisper-cli portátil com variantes de CPU, deep-filter) e modelos (Whisper small, SAM 2.1 tiny, LaMa, Demucs) vão dentro, verificados por SHA-256 no build; tamanho ~1,7 GB aceito pelo usuário. Downloads sob demanda ficam só para quem roda do código-fonte. Modelo de fala padrão passa a ser 'small' quando disponível.
+- 2026-11-10: separação de áudio = Demucs v4 em ONNX Runtime (StemSplit, MIT), sem PyTorch; todos os 6 modelos (966 MB)
+  vão no AppImage. Rejeitados: export ONNX do Ghilda (STFT fora do grafo; mais rápido 5%, mas pico de 2,3–2,5 GB);
+  RoFormers — BS-RoFormer viperx ep317 (`xycld/BS-RoFormer-ONNX`) e `BS-ROFO-SW` (`elicwhite/...`, origem
+  jarredou privada) sem licença clara; Mel-Band RoFormer do Kim (tag MIT no HF, repo sem LICENSE, só checkpoint
+  PyTorch de 913 MB: exigiria exportar e hospedar nós mesmos); `mochiya98` (GPL-3.0, só o miolo de 900 MB, cabeça
+  band-split a reimplementar); OpenVINO IR (outro runtime); modelos UVR/MDX da comunidade e `MansfieldPlumbing`/
+  `MrCitron` (cc-by-nc ou sem licença). Padrões por medição: limpeza Wiener desligada, DeepFilterNet na voz
+  falada (`so_voz`), qualidade alta.
 
 ## 8. Questões em aberto
 - Manter o idioma da interface em português ou adicionar i18n desde já?

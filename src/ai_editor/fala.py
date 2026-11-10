@@ -6,9 +6,10 @@ Tudo roda na máquina do usuário (nada vai para a nuvem):
     ~/.local/share/ai-editor/bin). Se faltar, `python -m ai_editor.fala --instalar-whisper` compila o release
     fixado (WHISPER_VERSAO) a partir do código-fonte, conferindo o SHA-256 do tarball (precisa de g++ e make;
     cmake do sistema ou, se não houver, o pacote pip `cmake` via `uvx`).
-  - modelos: ggml multilíngues do repositório oficial ggerganov/whisper.cpp no Hugging Face (MIT), baixados no
-    primeiro uso para ~/.local/share/ai-editor/modelos/whisper/ com SHA-256 conferido, arquivo .parcial e
-    renomeio atômico.
+  - modelos: ggml multilíngues do repositório oficial ggerganov/whisper.cpp no Hugging Face (MIT). No AppImage o
+    'small' (padrão quando disponível) vem embutido e nada é baixado; do código-fonte, baixados no primeiro uso para
+    ~/.local/share/ai-editor/modelos/whisper/ com SHA-256 conferido, arquivo .parcial e renomeio atômico.
+  - motor no AppImage: whisper-cli portátil embutido (compilar_whisper_portatil, usado pelo build).
   - cache das transcrições: ~/.cache/ai-editor/transcricoes/<hash do arquivo + parâmetros>.json.
 
 Sem Qt (usado pelo servidor MCP). Edições que mudam o vídeo (gravar/embutir legenda) usam o mecanismo de versões
@@ -65,7 +66,11 @@ MODELOS = {
     "small-q5_1": ("ggml-small-q5_1.bin", 190_085_487,
                    "ae85e4a935d7a567bd102fe55afc16bb595bdb618e11b2fc7591bc08120411bb", "small"),
 }
+# Modelo padrão: 'small' quando está disponível (o AppImage o traz embutido; do código-fonte, se já foi baixado),
+# senão 'base' (148 MB, baixado no primeiro uso do código-fonte). Veja modelo_padrao().
 MODELO_PADRAO = "base"
+MODELO_PREFERIDO = "small"
+_PADRAO_ALIAS = {"", "padrao", "padrão", "auto", "default"}
 
 MODELOS_WHISPER_DIR = binarios.MODELOS_DIR / "whisper"
 CACHE_TRANSCRICOES = core.CACHE_DIR / "transcricoes"
@@ -114,8 +119,16 @@ def norm_idioma(idioma: str | None) -> str:
                      f"'es', 'fr', 'de', 'it', 'ja', 'zh' (lista: {' '.join(sorted(_IDIOMAS_WHISPER))})")
 
 
+def modelo_padrao() -> str:
+    """'small' se estiver disponível (embutido no AppImage ou já baixado), senão MODELO_PADRAO ('base')."""
+    return MODELO_PREFERIDO if modelo_pronto(MODELO_PREFERIDO) else MODELO_PADRAO
+
+
 def norm_modelo(modelo: str | None) -> str:
-    m = str(modelo or MODELO_PADRAO).strip().lower()
+    """Nome canônico do modelo; None/'padrao'/'auto' → modelo_padrao()."""
+    m = str(modelo or "").strip().lower()
+    if m in _PADRAO_ALIAS:
+        return modelo_padrao()
     if m not in MODELOS:
         raise ValueError(f"modelo desconhecido: {modelo!r}. Opções: " + ", ".join(
             f"{k} ({_mb(v[1])})" for k, v in MODELOS.items()))
@@ -199,13 +212,15 @@ def _limpar_parciais(pasta: Path, idade_s: float = 3600) -> None:
             pass
 
 
-def caminho_modelo(modelo: str = MODELO_PADRAO) -> Path:
-    return MODELOS_WHISPER_DIR / MODELOS[norm_modelo(modelo)][0]
+def caminho_modelo(modelo: str | None = None) -> Path:
+    """Arquivo do modelo: o embutido no pacote, se houver; senão o da pasta do usuário (binarios.caminho_modelo)."""
+    return binarios.caminho_modelo("whisper", MODELOS[norm_modelo(modelo)][0])
 
 
-def modelo_pronto(modelo: str = MODELO_PADRAO) -> bool:
+def modelo_pronto(modelo: str | None = None) -> bool:
     """Modelo presente e íntegro. O SHA-256 é conferido UMA vez (~0,3 s para o base) e fica registrado num
-    marcador `.<arquivo>.ok` com tamanho, mtime e hash; depois basta comparar tamanho/mtime com o marcador."""
+    marcador `.<arquivo>.ok` com tamanho, mtime e hash; depois basta comparar tamanho/mtime com o marcador.
+    Modelo embutido no pacote (somente leitura): conferido no build, aqui só o tamanho."""
     nome = norm_modelo(modelo)
     arq, tam, sha, _ = MODELOS[nome]
     p = caminho_modelo(nome)
@@ -215,6 +230,8 @@ def modelo_pronto(modelo: str = MODELO_PADRAO) -> bool:
         return False
     if st.st_size != tam:
         return False
+    if binarios.modelo_embutido(p):
+        return True
     ok = p.with_name(f".{p.name}.ok")
     assinatura = f"{st.st_size} {st.st_mtime_ns} {sha}"
     try:
@@ -233,13 +250,19 @@ def modelo_pronto(modelo: str = MODELO_PADRAO) -> bool:
     return True
 
 
-def baixar_modelo(modelo: str = MODELO_PADRAO, progresso=None) -> tuple[Path, bool]:
-    """(caminho do modelo, True se baixou agora). Baixa só se ainda não existir (SHA-256 conferido)."""
+def baixar_modelo(modelo: str | None = None, progresso=None) -> tuple[Path, bool]:
+    """(caminho do modelo, True se baixou agora). Baixa só se ainda não existir (SHA-256 conferido).
+    Empacotado (AppImage) nunca baixa: o modelo que não veio no pacote dá erro dizendo quais vieram."""
     nome = norm_modelo(modelo)
     arq, tam, sha, _ = MODELOS[nome]
     final = MODELOS_WHISPER_DIR / arq
     if modelo_pronto(nome):
-        return final, False
+        return caminho_modelo(nome), False
+    if not binarios.downloads_permitidos():
+        prontos = [k for k in MODELOS if modelo_pronto(k)]
+        raise FalaIndisponivel(f"o modelo de fala '{nome}' não vem neste AppImage (e o AppImage não baixa nada). "
+                               f"Use um dos que vêm: {', '.join(prontos) or 'nenhum'}"
+                               + (f" (o padrão é '{modelo_padrao()}')" if prontos else ""))
     _limpar_parciais(MODELOS_WHISPER_DIR)
     try:
         _baixar(HF_BASE + arq, final, sha, tam, progresso, f"modelo {nome}")
@@ -321,15 +344,60 @@ def _cmake() -> list[str]:
                            "(ou instale o uv, que baixa o cmake do PyPI sem sudo)")
 
 
+_OPCOES_CMAKE = ["-DCMAKE_BUILD_TYPE=Release", "-DGGML_OPENMP=OFF", "-DWHISPER_BUILD_TESTS=OFF",
+                 "-DWHISPER_BUILD_SERVER=OFF", "-DWHISPER_SDL2=OFF", "-DWHISPER_CURL=OFF"]
+# Build PORTÁTIL (o do AppImage): nada de -march=native. A ggml vira bibliotecas compartilhadas e o backend de CPU é
+# compilado em todas as variantes x86-64 (x64/SSE4.2, AVX, AVX2, AVX-512, AVX-VNNI, AMX...); ao rodar, a ggml carrega
+# a melhor que o processador suporta (ggml_backend_load_all → ggml_backend_score). RPATH $ORIGIN: as .so ficam ao
+# lado do executável, que é também onde a ggml procura as variantes.
+_OPCOES_PORTATIL = ["-DBUILD_SHARED_LIBS=ON", "-DGGML_NATIVE=OFF", "-DGGML_BACKEND_DL=ON",
+                    "-DGGML_CPU_ALL_VARIANTS=ON", "-DCMAKE_BUILD_WITH_INSTALL_RPATH=ON",
+                    "-DCMAKE_INSTALL_RPATH=$ORIGIN"]
+
+
+def _ferramentas_build() -> list[str]:
+    for f in ("g++", "make"):
+        if not shutil.which(f):
+            raise FalaIndisponivel(f"para compilar o whisper.cpp falta o {f}: `sudo apt install build-essential`")
+    return _cmake()
+
+
+def _construir(tar: Path, trab: Path, opcoes: list[str], jobs: int | None, log, portatil: bool = False) -> Path:
+    """Extrai o tarball (já conferido) em `trab`, configura e compila. Devolve a pasta de build."""
+    cmake = _ferramentas_build()
+    with tarfile.open(tar) as t:
+        t.extractall(trab / "fonte", filter="data")
+    fonte = next((trab / "fonte").iterdir())
+    build = trab / "build"
+    log("configurando (cmake)")
+    r = subprocess.run(cmake + ["-S", str(fonte), "-B", str(build), *_OPCOES_CMAKE, *opcoes],
+                       capture_output=True, text=True, preexec_fn=_preexec())
+    if r.returncode != 0:
+        raise RuntimeError("falha ao configurar o whisper.cpp (cmake):\n" + (r.stdout + r.stderr)[-3000:])
+    alvos = ["whisper-cli"]
+    if portatil:  # as variantes do backend de CPU são carregadas em tempo de execução: nenhum alvo depende delas
+        r = subprocess.run(cmake + ["--build", str(build), "--target", "help"], capture_output=True, text=True)
+        alvos += sorted({m for m in re.findall(r"\b(ggml-cpu(?:-[\w.]+)?)\b", r.stdout)})
+        log("variantes da CPU: " + ", ".join(a.removeprefix("ggml-cpu-") for a in alvos[1:]))
+    j = jobs or max(1, min(4, os.cpu_count() or 1))  # 4 jobs: pico de RAM ~1 GB
+    log(f"compilando com {j} processos ({'5–10 min' if portatil else '1–2 min'})")
+    r = subprocess.run(cmake + ["--build", str(build), "--config", "Release", "-j", str(j), "--target", *alvos],
+                       capture_output=True, text=True, preexec_fn=_preexec())
+    if r.returncode != 0:
+        saida = r.stdout + r.stderr
+        if "No space left on device" in saida:
+            raise FalaIndisponivel("falha ao compilar o whisper.cpp: " + _msg_disco_cheio(trab))
+        raise RuntimeError("falha ao compilar o whisper.cpp:\n" + saida[-3000:])
+    return build
+
+
 def compilar_whisper(progresso=None, jobs: int | None = None, log=print) -> Path:
     """Baixa o código-fonte do whisper.cpp WHISPER_VERSAO (SHA-256 conferido), compila só o whisper-cli
     (estático, sem OpenMP/SDL/curl; otimizado para este processador) e instala em BIN_SOB_DEMANDA.
     Sem sudo. Pasta de trabalho própria (mkdtemp) em ~/.cache/ai-editor-build/ (apagada no fim, mesmo com erro).
-    Duas instalações ao mesmo tempo: a segunda espera a primeira (trava) e reaproveita o resultado."""
-    for f in ("g++", "make"):
-        if not shutil.which(f):
-            raise FalaIndisponivel(f"para compilar o whisper.cpp falta o {f}: `sudo apt install build-essential`")
-    cmake = _cmake()
+    Duas instalações ao mesmo tempo: a segunda espera a primeira (trava) e reaproveita o resultado.
+    (O AppImage já traz um whisper-cli portátil, feito por `compilar_whisper_portatil`.)"""
+    _ferramentas_build()
     raiz = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "ai-editor-build"
     raiz.mkdir(parents=True, exist_ok=True)
     destino = binarios.BIN_SOB_DEMANDA / "whisper-cli"
@@ -352,26 +420,7 @@ def compilar_whisper(progresso=None, jobs: int | None = None, log=print) -> Path
                 if _disco_cheio(e):
                     raise FalaIndisponivel("não consegui baixar o whisper.cpp: " + _msg_disco_cheio(raiz)) from e
                 raise
-            with tarfile.open(tar) as t:
-                t.extractall(trab / "fonte", filter="data")
-            fonte = next((trab / "fonte").iterdir())
-            build = trab / "build"
-            log("configurando (cmake)")
-            r = subprocess.run(cmake + ["-S", str(fonte), "-B", str(build), "-DCMAKE_BUILD_TYPE=Release",
-                                        "-DBUILD_SHARED_LIBS=OFF", "-DGGML_OPENMP=OFF", "-DWHISPER_BUILD_TESTS=OFF",
-                                        "-DWHISPER_BUILD_SERVER=OFF", "-DWHISPER_SDL2=OFF", "-DWHISPER_CURL=OFF"],
-                               capture_output=True, text=True, preexec_fn=_preexec())
-            if r.returncode != 0:
-                raise RuntimeError("falha ao configurar o whisper.cpp (cmake):\n" + (r.stdout + r.stderr)[-3000:])
-            j = jobs or max(1, min(4, os.cpu_count() or 1))  # 4 jobs: pico de RAM ~1 GB
-            log(f"compilando com {j} processos (1–2 min)")
-            r = subprocess.run(cmake + ["--build", str(build), "--config", "Release", "--target", "whisper-cli",
-                                        "-j", str(j)], capture_output=True, text=True, preexec_fn=_preexec())
-            if r.returncode != 0:
-                saida = r.stdout + r.stderr
-                if "No space left on device" in saida:
-                    raise FalaIndisponivel("falha ao compilar o whisper.cpp: " + _msg_disco_cheio(raiz))
-                raise RuntimeError("falha ao compilar o whisper.cpp:\n" + saida[-3000:])
+            build = _construir(tar, trab, ["-DBUILD_SHARED_LIBS=OFF"], jobs, log)
             exe = build / "bin" / "whisper-cli"
             binarios.BIN_SOB_DEMANDA.mkdir(parents=True, exist_ok=True)
             fd, tmp = tempfile.mkstemp(prefix=".whisper-cli.", suffix=".parcial", dir=binarios.BIN_SOB_DEMANDA)
@@ -396,11 +445,56 @@ def compilar_whisper(progresso=None, jobs: int | None = None, log=print) -> Path
     return destino
 
 
+def compilar_whisper_portatil(destino: Path | str, tarball: Path | str | None = None, jobs: int | None = None,
+                              log=print) -> list[Path]:
+    """Compila o whisper-cli PORTÁTIL (x86-64 genérico + variantes da CPU escolhidas ao rodar) para o AppImage e
+    copia para `destino` o executável e as bibliotecas (libwhisper, libggml, libggml-base, libggml-cpu-*), com
+    RPATH $ORIGIN. `tarball`: código-fonte já baixado (o build_appimage.sh usa o próprio cache); é conferido com
+    WHISPER_TARBALL_SHA256 de qualquer forma. Usado por packaging/build_appimage.sh, não pelo app."""
+    destino = Path(destino)
+    raiz = Path(os.environ.get("AI_EDITOR_BUILD_DIR", Path.home() / ".cache" / "ai-editor-build"))
+    raiz.mkdir(parents=True, exist_ok=True)
+    trab = Path(tempfile.mkdtemp(prefix="whisper.cpp-portatil-", dir=raiz))
+    try:
+        tar = trab / f"whisper.cpp-{WHISPER_VERSAO}.tar.gz"
+        if tarball:
+            shutil.copy2(tarball, tar)
+            h = hashlib.sha256(tar.read_bytes()).hexdigest()
+            if h != WHISPER_TARBALL_SHA256:
+                raise RuntimeError(f"SHA-256 do código-fonte do whisper.cpp não confere: {h}")
+        else:
+            log(f"baixando {WHISPER_TARBALL}")
+            _baixar(WHISPER_TARBALL, tar, WHISPER_TARBALL_SHA256, None, None, "código-fonte do whisper.cpp")
+        build = _construir(tar, trab, _OPCOES_PORTATIL, jobs, log, portatil=True)
+        destino.mkdir(parents=True, exist_ok=True)
+        copiados = [destino / "whisper-cli"]
+        shutil.copy2(build / "bin" / "whisper-cli", copiados[0])
+        # só os nomes de soname (libwhisper.so.1, libggml.so.0, libggml-base.so.0) e os módulos de backend carregados
+        # por dlopen (libggml-cpu-<variante>.so, sem versão); nada de links de desenvolvimento nem cópias duplicadas
+        libs = {}
+        for so in build.rglob("*.so*"):
+            if so.is_file() and (re.fullmatch(r"lib(whisper|ggml|ggml-base)\.so\.\d+", so.name)
+                                 or re.fullmatch(r"libggml-cpu-[\w.]+\.so", so.name)):
+                libs.setdefault(so.name, so)
+        for nome, so in sorted(libs.items()):
+            shutil.copy2(so.resolve(), destino / nome)
+            copiados.append(destino / nome)
+        for p in copiados:
+            subprocess.run(["strip", "--strip-unneeded", str(p)], check=False, capture_output=True)
+            os.chmod(p, 0o755)
+        log(f"instalado em {destino}: " + ", ".join(p.name for p in copiados))
+        return copiados
+    finally:
+        shutil.rmtree(trab, ignore_errors=True)
+
+
 def status() -> dict:
     """O que está pronto para transcrever (motor, modelos baixados)."""
     return {"whisper_cli": binarios.localizar("whisper-cli"),
-            "modelos": {k: {"baixado": modelo_pronto(k), "tamanho": _mb(v[1])} for k, v in MODELOS.items()},
-            "pasta_modelos": str(MODELOS_WHISPER_DIR)}
+            "modelos": {k: {"baixado": modelo_pronto(k), "tamanho": _mb(v[1]),
+                            "embutido": modelo_pronto(k) and binarios.modelo_embutido(caminho_modelo(k))}
+                        for k, v in MODELOS.items()},
+            "padrao": modelo_padrao(), "pasta_modelos": str(MODELOS_WHISPER_DIR)}
 
 
 # ---------------------------------------------------------------- transcrição
@@ -463,8 +557,10 @@ def extrair_audio(arquivo: Path, destino: Path, faixa: int = 1, inicio: float | 
 def _rodar_whisper(cmd: list[str], progresso=None) -> str:
     """Roda o whisper-cli lendo o progresso ('progress = N%') do stderr; devolve o stderr (para erros)."""
     linhas: list[str] = []
+    # cwd = pasta do executável: o whisper-cli portátil (AppImage) procura as variantes libggml-cpu-*.so na pasta
+    # dele E na pasta atual; rodando lá, nenhuma .so de uma pasta qualquer do usuário é carregada.
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, errors="replace",
-                            preexec_fn=_preexec())
+                            preexec_fn=_preexec(), cwd=os.path.dirname(os.path.realpath(cmd[0])))
     try:
         for linha in proc.stderr:
             linhas.append(linha)
@@ -643,13 +739,14 @@ def _limpar_orfaos_tmp(idade_s: float = 3600) -> None:
             pass
 
 
-def transcrever(arquivo: Path | str, idioma: str = "auto", modelo: str = MODELO_PADRAO, faixa: int = 1,
+def transcrever(arquivo: Path | str, idioma: str = "auto", modelo: str | None = None, faixa: int = 1,
                 inicio: float | None = None, fim: float | None = None, palavras: bool = True,
                 threads: int | None = None, usar_cache: bool = True, progresso=None) -> dict:
     """Transcreve a fala de `arquivo` (vídeo ou áudio) localmente com o whisper.cpp.
 
-    idioma: 'auto' (detecta) ou código ('pt', 'en'...); modelo: 'tiny' | 'base' (padrão) | 'small' |
-    'base-q5_1' | 'small-q5_1' (baixado no primeiro uso). faixa: faixa de áudio (1 = A1).
+    idioma: 'auto' (detecta) ou código ('pt', 'en'...); modelo: None/'padrao' (= 'small' se disponível — vem
+    embutido no AppImage —, senão 'base') | 'tiny' | 'base' | 'small' | 'base-q5_1' | 'small-q5_1' (do código-fonte,
+    baixado no primeiro uso; no AppImage só os embutidos). faixa: faixa de áudio (1 = A1).
     inicio/fim (segundos): só esse trecho; os tempos devolvidos são SEMPRE do arquivo inteiro.
     palavras=True: inclui cada palavra com tempo (alinhamento DTW do whisper.cpp; precisão típica ±0,1–0,3 s).
 
@@ -1024,7 +1121,7 @@ def _criar_exclusivo(p: Path, conteudo: str) -> Path:
 
 
 def gerar_legenda(arquivo: Path | str, formato: str = "srt", destino: str | Path | None = None,
-                  idioma: str = "auto", modelo: str = MODELO_PADRAO, faixa: int = 1,
+                  idioma: str = "auto", modelo: str | None = None, faixa: int = 1,
                   max_caracteres: int = 42, max_linhas: int = 2, duracao_min: float = 1.0,
                   duracao_max: float = 6.0, transcricao: dict | None = None, progresso=None) -> dict:
     """Transcreve (ou usa `transcricao`) e grava legenda(s) em ARQUIVO NOVO. formato: 'srt' | 'vtt' | 'ambos'.
@@ -1227,7 +1324,7 @@ def _legenda_do_documento(doc: Documento, legenda, idioma, modelo, faixa, max_ca
 
 
 def gravar_legenda(doc: Documento, legenda: str | Path | None = None, idioma: str = "auto",
-                   modelo: str = MODELO_PADRAO, faixa: int = 1, tamanho=None, cor: str | None = None,
+                   modelo: str | None = None, faixa: int = 1, tamanho=None, cor: str | None = None,
                    contorno: float | None = None, cor_contorno: str | None = None, posicao: str | None = None,
                    margem: float | None = None, caixa: bool | None = None, cor_caixa: str | None = None,
                    fonte: str | None = None, negrito: bool | None = None, max_caracteres: int = 42,
@@ -1282,7 +1379,7 @@ def _idioma_do_nome(stem: str) -> str | None:
 
 
 def embutir_legenda(doc: Documento, legenda: str | Path | None = None, idioma: str = "auto",
-                    modelo: str = MODELO_PADRAO, faixa: int = 1, titulo: str | None = None,
+                    modelo: str | None = None, faixa: int = 1, titulo: str | None = None,
                     padrao: bool = True, max_caracteres: int = 42, max_linhas: int = 2,
                     progresso=None) -> dict:
     """Acrescenta a legenda como FAIXA de legenda (liga/desliga no player), sem re-encodar vídeo nem áudio
@@ -1492,14 +1589,21 @@ def main(argv: list[str] | None = None) -> int:
     import argparse
     ap = argparse.ArgumentParser(prog="python -m ai_editor.fala", description=__doc__.split("\n")[0])
     ap.add_argument("--instalar-whisper", action="store_true", help=f"compila o whisper.cpp {WHISPER_VERSAO}")
+    ap.add_argument("--compilar-portatil", metavar="PASTA",
+                    help="compila o whisper-cli portátil (para o AppImage) e copia para PASTA")
+    ap.add_argument("--tarball", help="com --compilar-portatil: código-fonte já baixado (SHA-256 conferido)")
+    ap.add_argument("--jobs", type=int, help="processos de compilação (padrão: até 4)")
     ap.add_argument("--baixar-modelo", metavar="NOME", help="baixa um modelo (" + ", ".join(MODELOS) + ")")
     ap.add_argument("--status", action="store_true", help="mostra motor e modelos")
     ap.add_argument("arquivo", nargs="?", help="transcreve este arquivo e imprime o texto")
     ap.add_argument("--idioma", default="auto")
-    ap.add_argument("--modelo", default=MODELO_PADRAO)
+    ap.add_argument("--modelo", default=None, help="padrão: 'small' se disponível, senão 'base'")
     a = ap.parse_args(argv)
+    if a.compilar_portatil:
+        compilar_whisper_portatil(a.compilar_portatil, a.tarball, a.jobs)
+        return 0
     if a.instalar_whisper:
-        compilar_whisper()
+        compilar_whisper(jobs=a.jobs)
     if a.baixar_modelo:
         def pr(f):
             print(f"\r  {f * 100:5.1f}%", end="", flush=True)
