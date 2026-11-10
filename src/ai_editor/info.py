@@ -91,7 +91,7 @@ def como_texto(sec) -> str:
     partes = []
     for titulo, linhas in sec:
         partes.append(f"== {titulo} ==")
-        partes += [f"{k}: {v}" if k else v for k, v in linhas]
+        partes += [f"{k} {v}" if k == "•" else f"{k}: {v}" if k else v for k, v in linhas]
         partes.append("")
     return "\n".join(partes)
 
