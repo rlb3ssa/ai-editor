@@ -555,11 +555,12 @@ class Janela(QMainWindow):
         # barra de controles
         barra = QWidget()
         barra.setObjectName("barra")
-        bl = QHBoxLayout(barra)
-        bl.setContentsMargins(10, 6, 10, 6)
-        bl.setSpacing(2)
+        lb = QHBoxLayout(barra)
+        lb.setContentsMargins(10, 6, 10, 6)
+        lb.setSpacing(0)
+        alvo = [lb]  # layout onde btn() coloca os botões por padrão
 
-        def btn(nome, dica, fn, tam=20, papel="ctl", destino=bl):
+        def btn(nome, dica, fn, tam=20, papel="ctl", destino="atual"):
             b = QToolButton()
             b.setIcon(icone(nome))
             b.setIconSize(QSize(tam, tam))
@@ -568,29 +569,45 @@ class Janela(QMainWindow):
             b.setFocusPolicy(Qt.NoFocus)
             b.setAutoRaise(True)
             b.clicked.connect(fn)
+            if destino == "atual":
+                destino = alvo[0]
             if destino is not None:
                 destino.addWidget(b)
             return b
 
-        def sep():
+        def sep(destino):
             f = QFrame()
             f.setObjectName("sep")
             f.setFixedSize(1, 22)
-            bl.addSpacing(6)
-            bl.addWidget(f)
-            bl.addSpacing(6)
+            destino.addSpacing(6)
+            destino.addWidget(f)
+            destino.addSpacing(6)
 
-        btn("folder-open-outline", "Abrir (Ctrl+O)", self.dialogo_abrir)
-        sep()
+        def grupo():
+            w = QWidget()
+            lay = QHBoxLayout(w)
+            lay.setContentsMargins(0, 0, 0, 0)
+            lay.setSpacing(2)
+            return w, lay
+
+        # três grupos: esquerda (pasta) | centro (reprodução + IN/OUT) | direita (velocidade, volume, tela cheia).
+        # Esquerda e direita ganham a mesma largura mínima para o centro ficar realmente centralizado.
+        g_esq, esq = grupo()
+        g_cen, cen = grupo()
+        g_dir, dir_ = grupo()
+        btn("folder-open-outline", "Abrir (Ctrl+O)", self.dialogo_abrir, destino=esq)
+        esq.addStretch(1)
+        bl = alvo[0] = cen
         btn("skip-previous", "Início (Home)", lambda: self.pular(0))
         btn("step-backward", "Quadro anterior (,)", lambda: self.quadros(-1))
         self.b_play = btn("play", "Tocar/Pausar (Espaço)", self.alternar, tam=26, papel="play")
         self._icone_play = None
         btn("step-forward", "Próximo quadro (.)", lambda: self.quadros(1))
         btn("skip-next", "Fim (End)", lambda: self.pular(self.visao.dur))
-        sep()
+        sep(cen)
         btn("ray-start-arrow", "Marcar entrada IN (I)", lambda: self.marcar(entrada=self.pos)).setIcon(icone("ray-start-arrow", "#ffc400"))
         btn("ray-end-arrow", "Marcar saída OUT (O)", lambda: self.marcar(saida=self.pos)).setIcon(icone("ray-end-arrow", "#ffc400"))
+        bl = alvo[0] = dir_
         bl.addStretch(1)
         self.vel = QComboBox()
         self.vel.addItems(["0.25x", "0.5x", "0.75x", "1x", "1.25x", "1.5x", "2x"])
@@ -611,6 +628,14 @@ class Janela(QMainWindow):
         bl.addWidget(self.vol)
         bl.addSpacing(4)
         btn("fullscreen", "Tela cheia (F)", self._tela_cheia, tam=18)
+        lado = max(g_esq.sizeHint().width(), g_dir.sizeHint().width())
+        g_esq.setMinimumWidth(lado)
+        g_dir.setMinimumWidth(lado)
+        lb.addWidget(g_esq)
+        lb.addStretch(1)
+        lb.addWidget(g_cen)
+        lb.addStretch(1)
+        lb.addWidget(g_dir)
         raiz.addWidget(barra)
 
         # versão + desfazer/descartar/salvar ficam fixos no canto direito da barra de status
