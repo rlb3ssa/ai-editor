@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QFileDialog, QFrame, QHB
 import qtawesome as qta
 
 from . import cliente
+from . import info as _info
 from .core import CACHE_DIR, DEV, FONTE_DIR, NOME, RUNTIME_DIR, SOCKET_PATH, TITULO, Documento, fmt_tempo, parse_tempo
 from .ondas import PICOS_POR_SEG, picos
 
@@ -73,6 +74,9 @@ _PHOSPHOR = {
     "delete-outline": "trash",
     "content-save-outline": "floppy-disk",
     "chevron-down": "caret-down",
+    "information-outline": "info",
+    "content-copy": "copy",
+    "check": "check",
 }
 
 
@@ -617,6 +621,7 @@ class Janela(QMainWindow):
         g_cen, cen = grupo()
         g_dir, dir_ = grupo()
         btn("folder-open-outline", "Abrir (Ctrl+O)", self.dialogo_abrir, destino=esq)
+        btn("information-outline", "Metadados do arquivo (Ctrl+I)", self.mostrar_info, destino=esq)
         esq.addStretch(1)
         bl = alvo[0] = cen
         btn("skip-previous", "Início (Home)", lambda: self.pular(0))
@@ -753,9 +758,11 @@ class Janela(QMainWindow):
             ("End", lambda: self.pular(self.visao.dur)), ("Ctrl+O", self.dialogo_abrir),
             ("Ctrl+S", self.salvar), ("Ctrl+Z", self.desfazer),
             ("+", lambda: self.visao.zoom(0.5, self.pos)), ("-", lambda: self.visao.zoom(2, self.pos)),
-            ("0", lambda: self.visao.zoom(1e9, 0)), ("F", self._tela_cheia), ("M", self._alternar_mudo_geral), ("Ctrl+G", self.editar_tempo),
+            ("0", lambda: self.visao.zoom(1e9, 0)), ("F", self._tela_cheia), ("M", self._alternar_mudo_geral), ("Ctrl+G", self.editar_tempo), ("Ctrl+I", self.mostrar_info),
         ]:
             QShortcut(QKeySequence(tecla), self, fn)
+
+        self.painel_info = _info.PainelMetadados(self, icone)
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._tick)
@@ -875,6 +882,20 @@ class Janela(QMainWindow):
                 for i in range(len(ms) - 1)
             ],
         }
+
+    def mostrar_info(self):
+        if not self.doc:
+            self.statusBar().showMessage("abra um arquivo para ver os metadados", 3000)
+            return
+        if self.painel_info.isVisible():
+            self.painel_info.fechar()
+        else:
+            self.painel_info.abrir(self.doc.atual())
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        if hasattr(self, "painel_info") and self.painel_info.isVisible():
+            self.painel_info.setGeometry(self.rect())
 
     def editar_tempo(self):
         """Troca o tempo do canto da régua por um campo editável já preenchido e selecionado."""
@@ -1178,6 +1199,8 @@ class Janela(QMainWindow):
             destino = a.get("arquivo") or str(RUNTIME_DIR / "captura.png")
             self.grab().save(destino)
             return {"arquivo": destino}
+        elif cmd == "info":
+            self.mostrar_info()
         elif cmd == "editar_tempo":
             # abre o campo de tempo do canto da régua; com "valor", digita e confirma (como Enter)
             self.editar_tempo()
@@ -1371,7 +1394,7 @@ def _tema(app: QApplication):
     if not seta.exists():
         seta.parent.mkdir(parents=True, exist_ok=True)
         icone("chevron-down", "#8b949e").pixmap(28, 28).save(str(seta))
-    app.setStyleSheet(QSS.replace("@SETA@", seta.as_posix()))
+    app.setStyleSheet(QSS.replace("@SETA@", seta.as_posix()) + _info.QSS)
 
 
 def main():

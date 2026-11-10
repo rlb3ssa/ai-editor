@@ -562,7 +562,8 @@ _PISTAS_TEXTO = [
     (r"(twitter|x)\.com", "origem X/Twitter"),
     (r"facebook|fbcdn", "origem Facebook"),
     (r"Google", "processado por serviço Google (ex.: YouTube/Fotos)"),
-    (r"Apple|iPhone|iPad|Core Media", "dispositivo/software Apple"),
+    # "Apple" sozinho dá falso positivo (HandlerVendorID do MP4 vem como Apple em arquivos comuns)
+    (r'iPhone|iPad|Core Media|Make": "Apple|com\.apple\.quicktime\.make', "dispositivo/software Apple"),
     (r"com\.android|Android", "dispositivo Android"),
     (r"samsung", "dispositivo Samsung"),
     (r"\bDJI\b", "drone/câmera DJI"),
@@ -571,6 +572,11 @@ _PISTAS_TEXTO = [
     (r"DaVinci|Resolve|Blackmagic", "DaVinci Resolve/Blackmagic"),
     (r"CapCut|Bytedance|ByteDance", "editado no CapCut"),
     (r"Kdenlive|Shotcut|OpenShot|MLT", "editado em editor livre (Kdenlive/Shotcut/MLT)"),
+    (r"clideo", "editado/convertido no Clideo (editor online)"),
+    (r"kapwing", "editado no Kapwing (editor online)"),
+    (r"\bcanva\b", "editado no Canva"),
+    (r"\bveed\b", "editado no VEED (editor online)"),
+    (r"InShot", "editado no InShot"),
     (r"WhatsApp", "passou pelo WhatsApp"),
     (r"Telegram", "passou pelo Telegram"),
     (r"trainedAlgorithmicMedia|compositeWithTrainedAlgorithmicMedia", "C2PA declara conteúdo gerado por IA"),
@@ -587,6 +593,11 @@ _PISTAS_NOME = [
     (r"^(Gravação de tela|Screencast|Screen Recording)", "gravação de tela"),
     (r"^(DJI|GH|GX|GOPR)\d+", "nome típico de DJI/GoPro"),
     (r"\[[A-Za-z0-9_-]{11}\]", "nome com ID de 11 caracteres (padrão yt-dlp/YouTube)"),
+    (r"ytdown|savefrom|y2mate|ssyoutube|snaptik|ssstik|snapinsta|ytmp3|9convert",
+     "baixado por site de download de vídeos (ytdown, savefrom, y2mate, snaptik...)"),
+    (r"youtube|youtu\.be", "nome indica origem YouTube"),
+    (r"tiktok", "nome indica origem TikTok"),
+    (r"instagram|reels?\b", "nome indica origem Instagram"),
 ]
 
 
@@ -674,9 +685,11 @@ def _resumo(rel: dict) -> dict:
     ex = rel.get("exiftool", {}) if isinstance(rel.get("exiftool"), dict) else {}
 
     def ex_busca(*nomes):
-        for k, v in ex.items():
-            if k.split(":")[-1] in nomes:
-                return v
+        """Primeiro valor útil, respeitando a ordem de preferência dos nomes."""
+        for nome in nomes:
+            for k, v in ex.items():
+                if k.split(":")[-1] == nome and v not in (None, "") and not str(v).startswith("0000:00:00"):
+                    return v
         return None
 
     faixas = []
@@ -703,7 +716,7 @@ def _resumo(rel: dict) -> dict:
         "bitrate_total": fmt.get("bit_rate"),
         "data_criacao": tags.get("creation_time") or ex_busca("CreateDate", "CreationDate", "MediaCreateDate"),
         "dispositivo": " ".join(str(x) for x in (ex_busca("Make"), ex_busca("Model")) if x) or None,
-        "software": ex_busca("Software", "Encoder", "HandlerDescription") or tags.get("encoder"),
+        "software": ex_busca("Software", "Encoder", "CreatorTool") or tags.get("encoder"),
         "gps": ex_busca("GPSCoordinates", "GPSPosition", "LocationInformation"),
         "titulo": tags.get("title"),
         "comentario": tags.get("comment") or tags.get("description"),
