@@ -19,7 +19,9 @@ O spec, o roadmap e as decisões ficam em **`plano.md`** — leia antes de come�
 | `src/ai_editor/info.py` | Modal de metadados (glassmorphism) |
 | `src/ai_editor/exportacao.py` | Painel de exportação (mesmo vidro); roda `core.exportar` em `QThreadPool` |
 | `src/ai_editor/cliente.py` | Cliente do socket da janela |
+| `src/ai_editor/fala.py` | Fala/legendas (Fase 6, sem Qt): whisper.cpp sob demanda, modelos com SHA-256, transcrição com cache, .srt/.vtt, gravar/embutir legenda, `buscar_fala` |
 | `src/ai_editor/mcp_server.py` | Servidor MCP (stdio); fala com a janela pelo socket |
+| `src/ai_editor/objetos.py` | Fase 7, sem Qt: IA local sob demanda (ONNX Runtime opcional, extra `ia`) — SAM 2.1 segmenta/rastreia, LaMa remove; máscaras, fundo, recorte com alfa, tarefas em segundo plano |
 
 Fluxo: Claude → MCP (`ai-editor-mcp`) → socket Unix JSON-lines (`{"cmd":..., ...}` → `{"ok", "dados"|"erro"}`) → janela.
 Edições pesadas (ffmpeg) rodam no processo do MCP via `core.py`; depois o MCP manda `recarregar` para a janela.
@@ -114,6 +116,25 @@ cancelar/fechar/estado, `predefinicao`, `trecho`=índice no combo, `limite_mb`, 
   compara com o pts de SAÍDA (deslocado por B-frames/priming): passe os keyframes exatos + `-segment_time_delta`.
   `select=gt(scene,x)` com `-t` na saída ainda processa quadros depois do fim: ponha `-t` antes do `-i`. Na janela,
   capítulos vêm de `chapter-list` do mpv (relidos quando muda arquivo/duração em `_tick`).
+- Objetos (Fase 7, `objetos.py`): o export ONNX do SAM 2.1 (`onnx-community`) é só de IMAGEM (codificador
+  1024x1024 + decodificador de prompts, **sem** entrada de máscara anterior nem memória de vídeo): o rastreamento é
+  quadro a quadro (caixa ampliada + ponto interno da máscara vizinha; das 3 saídas, a de maior IoU previsto + IoU
+  com a anterior). Pontos/caixa vão em coordenadas 1024 (imagem esticada, sem manter proporção); máscara sai em
+  256x256 (logits) e é ampliada por bilinear antes do limiar 0. Ida para trás: blocos de 30 quadros decodificados com
+  `-ss` e percorridos ao contrário (nunca `reverse`, que guarda o vídeo todo), logits num `np.memmap` em disco.
+  Quadro ↔ tempo: frames saem em CFR (`-fps_mode cfr -r taxa`), índice i = (t − atraso do vídeo)·fps, e o `-ss` de um
+  quadro é 1/4 de quadro antes dele (`_ss_do_quadro`). Máscaras ficam em `~/.cache/ai-editor/mascaras/<hash>/`, NÃO
+  em `.versoes/` (o `desfazer` da última versão apaga a pasta toda). LaMa ONNX tem entrada fixa 512x512 (recorte em
+  volta do buraco) e saída já em 0–255; ~7 s/quadro em 4 threads (os dois exports, opencv e Carve, iguais): por isso
+  o padrão para câmera parada é o "fundo visto mais recentemente" + LaMa uma vez no que nunca aparece. Média temporal
+  do fundo deixava fantasmas de coisas que passaram. Sem OpenCV: borrão/dilatação por somas acumuladas (`_caixa`).
+  Carregar a sessão do LaMa leva ~20–30 s (otimização do grafo); as sessões ficam em cache no processo do MCP.
+- Fala (Fase 6, `fala.py`): `whisper-cli` em `~/.local/share/ai-editor/bin` (compilar: `python -m ai_editor.fala
+  --instalar-whisper`; `--status` mostra motor/modelos). Os tempos de segmento do whisper vêm arredondados em janelas de
+  ~4 s: use o DTW (`--dtw base` **com `-nfa`**; com flash attention o `t_dtw` sai −1 sem aviso). Não use `--vad` junto:
+  ele remapeia só os segmentos, não os tokens/DTW. Legenda queimada: gerar `.ass` com PlayRes = vídeo e estilo no
+  arquivo; `force_style` com `Alignment` muda de significado entre versões da libass (0.17.1 usa o formato SSA antigo).
+  Testes de fala sem TTS no sistema: `uvx --from piper-tts piper` + voz `pt_BR-faber-medium` (só no scratchpad).
 
 ## Git
 - Trabalhe na branch **`dev`**. Commits pequenos, mensagem em português no imperativo

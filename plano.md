@@ -81,6 +81,31 @@ Montagem e análise (Fase 5; `core.py` seção "montagem"):
 - `relatorio_tecnico(arquivo, faixa)`: bitrate, GOP, VFR, entrelaçamento, cor/HDR, LUFS/pico/clipping, indícios de
   recompressão e recomendações.
 
+Fala e legendas (Fase 6; `fala.py`; transcrição 100% local com whisper.cpp; modelo baixado no 1º uso com aviso do tamanho):
+- `transcrever(idioma, modelo=base|tiny|small|base-q5_1|small-q5_1, faixa, inicio, fim, palavras, arquivo)`: texto +
+  segmentos com tempo (e palavras com tempo, se pedido). Cache por conteúdo + parâmetros em `~/.cache/ai-editor/transcricoes`.
+- `gerar_legenda(formato=srt|vtt|ambos, idioma, modelo, faixa, destino, max_caracteres, max_linhas, arquivo)`: ARQUIVO NOVO
+  `video.pt.srt` ao lado do original (nunca sobrescreve: `video.pt.2.srt`).
+- `gravar_legenda(legenda?, estilo: tamanho, cor, contorno, cor_contorno, posicao=base|topo|centro, margem, caixa, cor_caixa,
+  fonte, negrito)`: queima na imagem (versão). Sem `legenda`, transcreve a versão atual.
+- `embutir_legenda(legenda?, idioma, titulo, padrao)`: faixa de legenda soft sem reencodar (versão): mov_text (MP4/MOV),
+  SRT/ASS (MKV), WebVTT (WebM).
+- `buscar_fala(texto, limiar, margem_s, marcar_na_regua, arquivo)`: edição pelo texto — trechos [[ini, fim]] onde a frase é
+  dita (aproximada, sem acento/caixa/pontuação) → `remover_trechos`/`cortar`.
+
+Objetos (Fase 7; IA local sob demanda em `objetos.py`; precisa do extra `ia` = ONNX Runtime; operações longas viram
+tarefas: a ferramenta espera até 50 s e, se não terminou, devolve o id da tarefa):
+- `segmentar_objeto(pontos, caixa, pontos_negativos, tempo, inicio, fim, modelo, passo_quadros)`: SAM 2.1 acha o objeto
+  no quadro em `tempo` e o rastreia pelo trecho (para a frente e para trás) → máscara `obj1`, `obj2`... + quadros de
+  conferência com o objeto pintado.
+- `ajustar_mascara(tempo, pontos, pontos_negativos, caixa, mascara)`: refaz com os prompts antigos + os novos (máscara nova).
+- `destacar_objeto(mascara, cor, opacidade, contorno)`: versão de pré-visualização (pintado + contorno).
+- `remover_objeto(mascara, metodo=auto|fundo|lama|rapido, margem)`: versão sem o objeto, fundo reconstruído.
+- `fundo_objeto(modo=desfocar|cor|imagem|cinza, intensidade, cor, imagem, mascara)`: versão com o fundo trocado/desfocado.
+- `recortar_objeto(formato=webm|mov|mascara, inverter, audio, destino, mascara)`: ARQUIVO NOVO só do trecho, com alfa
+  (VP9 `yuva420p` / ProRes 4444) ou o vídeo P&B da máscara; `inverter=True` deixa o objeto transparente.
+- `tarefas(id, acao=estado|esperar|cancelar)` e `objetos_ia(baixar)` (ONNX Runtime, modelos, memória, máscaras do vídeo).
+
 ### 2.3 Regras de versões
 - Cada edição grava `vNNN.ext` em `.<arquivo>.versoes/` ao lado do original, com `historico.json`.
 - **Salvar**: a última versão vira o original; o original vai para a Lixeira e as versões são apagadas.
@@ -336,23 +361,90 @@ Só com o ffmpeg. Código em `core.py`, seção "montagem (Fase 5)"; ferramentas
   longos é estimado por amostragem.
 
 ### Fase 6 — Legendas e fala (IA local)
-- [ ] Transcrição local com Whisper (whisper.cpp sob demanda, ou o filtro `whisper` do ffmpeg 8).
-- [ ] Gerar `.srt`/`.vtt` e gravar legenda no vídeo (libass).
-- [ ] Edição pelo texto ("corta onde ele fala X").
+Módulo `src/ai_editor/fala.py` (sem Qt); ferramentas MCP na seção "fala (Fase 6)" do `mcp_server.py`.
+- [x] Transcrição local com **whisper.cpp v1.9.5** (`whisper-cli`, MIT), compilado do código-fonte uma vez
+  (`python -m ai_editor.fala --instalar-whisper`: tarball da tag com SHA-256 fixado, cmake do sistema ou `uvx cmake`, só o
+  alvo `whisper-cli`, estático, sem OpenMP/SDL/curl, `-j4`; ~80 s, binário de 3,2 MB em `~/.local/share/ai-editor/bin`).
+  Modelos ggml multilíngues (tiny/base/small + base/small q5_1) do HF `ggerganov/whisper.cpp`, revisão fixada, SHA-256
+  conferido, `.parcial` + `os.replace`, em `~/.local/share/ai-editor/modelos/whisper/`. Padrão `base`.
+  - Áudio extraído com ffmpeg para WAV 16 kHz mono (faixa escolhida, `-ss/-t` se houver trecho).
+  - Tempos: o whisper sozinho arredonda os segmentos para janelas de ~4 s (medido: 0–4, 4–8...). Usamos o alinhamento
+    **DTW** (`--dtw <modelo>`; exige `-nfa`, sem flash attention) com correção de atraso de 0,1 s, redistribuição de
+    palavras "coladas" no mesmo instante e encaixe das bordas nas pausas medidas (`silencedetect`, limiar = volume médio
+    −18 dB). Resultado com fala sintética: início dos segmentos a +0,03–0,06 s e fim a −0,12–0,19 s do gabarito.
+  - Alucinações típicas ("Thank you.", "Legendas pela comunidade Amara.org"...) com confiança média < 0,75 são descartadas
+    e listadas em `descartados`.
+  - Desempenho (i7-8565U, 4 núcleos/8 threads, `-t 4`, modelo base, máquina carregada por outros processos): 22 s de áudio em
+    3,7–6 s (fator 0,17–0,28); 131 s em 44,6 s (0,34). RAM do whisper-cli: ~420 MB. WER na fala sintética PT: 7% (3/43).
+- [x] Gerar `.srt`/`.vtt` (máx. 42 caracteres × 2 linhas, 1–6 s; quebra em fim de frase/pausa, divisão equilibrada de
+  frases longas preferindo vírgulas, sem deixar "de/por/o..." no fim da linha) e gravar legenda no vídeo (libass).
+  A gravação gera um `.ass` (`legenda_vNNN.estilo.ass` na pasta de versões) com PlayRes = tamanho do vídeo e o estilo
+  escrito no próprio arquivo — **não** via `force_style`: a libass 0.17.1 do Ubuntu lê `Alignment` do force_style no
+  formato antigo do SSA (8 = meio à esquerda), versões novas no V4+. Letra padrão = 5,5% do menor lado (vertical ok).
+  `embutir_legenda` cria faixa soft sem reencodar.
+- [x] Edição pelo texto (`buscar_fala` → `remover_trechos`). Busca aproximada (difflib sobre palavras normalizadas,
+  janelas de n−2 a n+2 palavras). Bordas: com pausa, folga `margem_s` dentro da pausa; fala emendada, o vale de energia
+  mais próximo (±0,1 s, quadros de 10 ms). Teste: 8 cortes em fala sintética contínua, 7 palavras vizinhas afetadas
+  (sem o refinamento: 8) — em fala emendada pode sobrar/faltar uma sílaba; confira com `ver_trecho`.
+- Limitações: testado só com fala sintética (piper, voz pt_BR faber) e a amostra jfk.wav (inglês); sem diarização
+  (quem fala); VAD do whisper.cpp (Silero) avaliado e não usado (os tempos de token/DTW não são remapeados com VAD).
+  O binário é compilado com `GGML_NATIVE` (otimizado para a CPU local): para o AppImage, compilar sem nativo ou
+  distribuir o fonte+receita.
 
 ### Fase 7 — Objetos: destacar e remover (IA local)
-Fluxo: o Claude localiza o objeto nos quadros → segmenta e rastreia → mostra o contorno para confirmação → remove (transparente ou reconstruído).
+Fluxo: o Claude localiza o objeto nos quadros (`ver_quadros`) → `segmentar_objeto` (rastreia e devolve quadros de
+conferência) → confirma/`ajustar_mascara` → `remover_objeto` / `fundo_objeto` / `recortar_objeto`. Código em
+`objetos.py` (sem Qt); o MCP só tem um bloco de ferramentas no fim de `mcp_server.py`.
 
-- [ ] Ambiente de IA separado, carregado sob demanda; modelos baixados no primeiro uso para `~/.local/share/ai-editor/modelos`.
-- [ ] Inferência com **ONNX Runtime** (CPU; OpenVINO opcional para GPU Intel).
-- [ ] `segmentar_objeto(pontos|caixa, tempo)`: SAM 2.1 tiny, rastreamento por todos os quadros, máscara salva junto das versões.
-- [ ] `ajustar_mascara`: pontos positivos/negativos para refinar.
-- [ ] `destacar_objeto`: versão de pré-visualização com contorno e realce.
-- [ ] `remover_objeto(modo="transparente")`: exporta com alfa.
-- [ ] `remover_objeto(modo="consertar")`:
-  - câmera parada: LaMa em um quadro e o mesmo remendo aplicado em todos (estável, rápido);
-  - câmera em movimento: propagação por fluxo óptico + preenchimento; avaliar alternativa de licença livre ao ProPainter (licença não comercial).
-- [ ] Tarefas longas em segundo plano: a ferramenta devolve um id, `tarefas` consulta o progresso, a janela mostra a barra.
+- [x] Ambiente de IA opcional, carregado sob demanda: `onnxruntime` no extra `[ia]` do pyproject (`uv sync --extra ia`;
+  numpy já é dependência). Sem ele, o resto do editor funciona e as ferramentas dão erro com a dica de instalação
+  (testado bloqueando o import). Modelos baixados no primeiro uso para `~/.local/share/ai-editor/modelos/<nome>/`, de
+  URLs do Hugging Face com **commit fixo**, tamanho e **SHA-256 fixos no código**, `.parcial` + `os.replace`; só
+  arquivos `.onnx`/`.onnx_data` (dados), com `ORIGEM.txt` (repo, revisão, licença, hashes). Download do SAM tiny
+  (156 MB) ~55 s, LaMa (93 MB) ~21 s.
+- [x] Inferência com **ONNX Runtime** em CPU (`intra_op_num_threads=4`, sessões em cache no processo). Antes de abrir
+  um modelo confere `MemAvailable` (< 2,5 GB → espera de 60 em 60 s, até 20 min). Uma tarefa de IA por vez (trava).
+  OpenVINO não foi tentado.
+- [x] `segmentar_objeto`: SAM 2.1 **tiny** (ou `small`) do `onnx-community` — só o modelo de imagem (codificador
+  1024x1024 + decodificador de prompts). **Decisão:** a propagação por memória do SAM 2 não está nesse export (os exports
+  "video" no HF são de contas pequenas, sem procedência clara) → rastreamento quadro a quadro: o prompt de cada quadro
+  vem da máscara do vizinho (caixa ampliada 12% + ponto interno), e das 3 máscaras do SAM fica a de maior IoU previsto +
+  IoU com a anterior; quadros com prompt do usuário usam os pontos dele. Para trás: blocos de 30 quadros com `-ss`,
+  percorridos ao contrário, logits em `np.memmap`. Vídeo lido em fluxo (pipe do ffmpeg, já em 1024x1024).
+  Máscara = vídeo FFV1 cinza + .json em `~/.cache/ai-editor/mascaras/<hash do original>/` (fora de `.versoes/`, que o
+  `desfazer` da última versão apaga; limpas após 7 dias sem uso). Teste (círculo sintético se movendo sobre o testsrc2,
+  prompt de 1 ponto no meio do trecho, 30 quadros, 15 para trás + 15 para a frente): **IoU com o gabarito 0,974–0,991**
+  (média 0,986) em todos os quadros, alinhamento de quadro exato; **2–4 s/quadro** (máquina carregada, load ~13),
+  pico de RSS **1,8 GB**. `passo_quadros=k` roda o SAM a cada k quadros.
+- [x] `ajustar_mascara`: refaz com prompts antigos + novos (positivos/negativos/caixa num tempo); máscara nova.
+- [x] `destacar_objeto`: versão de pré-visualização (pintado + contorno).
+- [x] Recorte com alfa → `recortar_objeto` (arquivo novo, não versão; reserva/`.parcial`/publicação de `core.exportar`):
+  WebM VP9 `yuva420p` (`alpha_mode=1`) e ProRes 4444 `yuva444p12le`, ou o vídeo da máscara (MP4 P&B); `inverter=True`
+  = objeto transparente. Conferido decodificando o alfa (libvpx-vp9): média 4,9/255 = 1,9% (área do objeto); invertido
+  250/255; ProRes 78/4095 (12 bits); pixel no centro do objeto (219,28,38,α255), fora α0.
+- [x] `remover_objeto`:
+  - `fundo` (câmera parada): o buraco recebe o fundo visto **mais recentemente** (1ª passada guarda o primeiro valor visto
+    de cada pixel; o que nunca aparece → LaMa UMA vez e o remendo vale para todos os quadros). Média temporal foi tentada
+    e deixava "fantasmas" de coisas que passaram pelo fundo. Teste: círculo removido sem resto visível, 4,6 s para 3 s de
+    vídeo, 280 MB.
+  - `lama` (câmera em movimento): LaMa (`opencv/inpainting_lama`, 512x512 fixo) por quadro num recorte quadrado em volta
+    do buraco (contexto ~0,8× o tamanho de cada lado), composição com borda suave. LAMA_RESULTADO
+  - `rapido`: sem modelo (convolução normalizada em várias escalas); objetos pequenos/fundo liso. 8,6 s para 3 s, 300 MB.
+  - `auto`: mede o movimento da câmera (mediana da diferença para o 1º quadro nas áreas visíveis, em 1/8 da resolução):
+    ≤ 6 → `fundo`; senão `lama` se couber em ~10 min, senão `rapido` com aviso.
+  - Fluxo óptico/ProPainter não entraram (ProPainter é não comercial; nenhuma alternativa livre leve testada).
+- [x] `fundo_objeto`: `desfocar` (borrão em caixa em 3 escalas, sem OpenCV), `cor` (verde = chroma key), `imagem`, `cinza`.
+  Só no trecho da máscara; quadros sem objeto viram todo fundo.
+- [x] Tarefas longas em segundo plano: `iniciar_tarefa` (thread, progresso, cancelar, fila de 1), ferramenta `tarefas`;
+  a barra de status da janela mostra "Claude: segmentando objeto… N%". As ferramentas esperam 50 s antes de devolver o id.
+- Limitações: SAM roda ~2–4 s/quadro (3 s de vídeo ≈ 3–6 min); rastreamento sem memória pode trocar de objeto se outro
+  parecido encostar, ou perder o objeto em oclusão total (o quadro fica vazio e o próximo tenta de novo com a última
+  caixa; corrigir com `ajustar_mascara`); LaMa ~7 s/quadro e pode tremular entre quadros; `fundo` assume câmera parada
+  e iluminação constante; o vídeo passa por rgb24 (10 bits vira 8; SAR/rotação já aplicados como na Fase 3) e é
+  re-encodado inteiro (x264 CRF 18; PSNR fora do trecho 43,7 dB); VFR vira CFR; tarefas vivem no processo do MCP
+  (reiniciar o MCP perde as tarefas, não as máscaras); edições feitas por outras ferramentas enquanto uma tarefa roda
+  não são bloqueadas. A máscara vale para o vídeo atual se tamanho e fps baterem e o trecho couber (aviso se calculada
+  em outra versão).
 
 ### Fase 8 — Distribuição
 - [x] Ponto de entrada único `ai-editor` (`cli.py`): `[arquivo]` abre a janela, `--mcp`, `--diagnostico`,
@@ -465,10 +557,10 @@ Meta: AppImage comprimido com ~150–250 MB. Obtido: **233 MB** (164 MB com `FFM
 Destino: `~/.local/share/ai-editor/bin` e `~/.local/share/ai-editor/modelos`.
 | Ferramenta | Para quê | Licença | Tamanho |
 |---|---|---|---|
-| ONNX Runtime (+ OpenVINO opcional) | motor das IAs no processador | MIT | ~50 MB |
-| SAM 2.1 tiny | recortar/rastrear objetos (Fase 3) | Apache-2.0 | ~150 MB |
-| LaMa | preencher fundo removido (Fase 3) | Apache-2.0 | ~200 MB |
-| whisper.cpp (`whisper-cli`) + modelo base/small | legendas/transcrição (Fase 4) — ou o filtro `whisper` do ffmpeg 8, se o build tiver | MIT | 5 MB + 150–470 MB |
+| ONNX Runtime 1.31 (pip, extra `[ia]`; deps flatbuffers Apache-2.0, protobuf BSD-3) | motor das IAs no processador | MIT | ~50 MB |
+| SAM 2.1 tiny (`onnx-community/sam2.1-hiera-tiny-ONNX` @ `814a066`, fp32; `small` opcional @ `a7df49d`, 184 MB) | segmentar/rastrear objetos (Fase 7) | Apache-2.0 (pesos da Meta; o repo ONNX não declara licença própria — conversão herda a Apache-2.0) | 156 MB |
+| LaMa (`opencv/inpainting_lama` @ `aee6d22`, `inpainting_lama_2025jan.onnx`; derivado do `Carve/LaMa-ONNX`) | preencher fundo removido (Fase 7) | Apache-2.0 (LICENSE no repo) | 93 MB |
+| whisper.cpp v1.9.5 (`whisper-cli`, compilado do fonte: tarball SHA-256 `ff1a9053…dc1720`) + modelos ggml tiny/base/small (HF `ggerganov/whisper.cpp` @ `5359861c`, SHA-256 fixados em `fala.MODELOS`) | legendas/transcrição (Fase 6) | MIT (código e modelos) | 3,2 MB + 78/148/488 MB (q5_1: 60/190 MB) |
 | DeepFilterNet | redução de ruído de alta qualidade | MIT/Apache-2.0 | ~10 MB |
 | Demucs (opcional) | separar voz e música | MIT | ~300 MB |
 
@@ -483,6 +575,10 @@ GitHub Actions. Não usamos linuxdeploy: as dependências são resolvidas com `l
 ### 5.5 A confirmar
 - ~~Se os builds estáticos do ffmpeg 8 trazem o filtro `whisper`~~ — **não**: o FFmpeg-Builds (BtbN) usa `--disable-whisper`
   (verificado em 2026-11-10 no n8.1). Transcrição continua via whisper.cpp sob demanda.
+- Distribuir o `whisper-cli` pronto (build portátil sem `GGML_NATIVE`, com `GGML_CPU_ALL_VARIANTS`) em vez de compilar na
+  máquina do usuário (hoje exige g++/make e cmake ou uv). Por ora: compilação local, sem sudo, ~80 s.
+- VAD Silero do whisper.cpp (`ggml-silero-v6.2.0.bin`, 0,9 MB, MIT) para áudio longo com muita música/silêncio: precisa
+  remapear os tempos de token/DTW (o whisper-cli só remapeia os segmentos).
 
 ## 6. Licença e dependências
 
@@ -496,8 +592,9 @@ Projeto: **GPL-3.0**.
 | python-mpv | GPL-2.0+ / LGPL | ok |
 | QtAwesome (+ Phosphor, MDI) | MIT / fontes MIT, Apache | ok |
 | mcp SDK, numpy | MIT / BSD | ok |
-| SAM 2.1 | Apache-2.0 | ok com GPL-3.0 |
-| LaMa | Apache-2.0 | ok com GPL-3.0 |
+| SAM 2.1 (pesos; export ONNX onnx-community) | Apache-2.0 | ok com GPL-3.0; baixado sob demanda, não vai no pacote |
+| ONNX Runtime (+ flatbuffers, protobuf) | MIT (+ Apache-2.0, BSD-3) | ok; dependência opcional (extra `ia`) |
+| LaMa (ONNX do opencv_zoo) | Apache-2.0 | ok com GPL-3.0; baixado sob demanda |
 | ProPainter | NTU S-Lab 1.0 (não comercial) | **evitar no pacote**; no máximo opcional |
 | mediainfo (+ libmediainfo, libzen) | BSD-2-Clause | no AppImage, do Ubuntu |
 | exiftool | Artistic / GPL-1.0+ | no AppImage (código Perl) |
@@ -517,6 +614,8 @@ Lista completa e links de código-fonte: `packaging/LICENCAS_TERCEIROS.md` e `CO
 - 2026-11-10: "pistas de origem" são regras locais (`core._PISTAS_*`), sem IA: funcionam offline e sem o Claude conectado.
 - 2026-11-10: exportação = ferramenta única `exportar` com predefinições em tabela; foto de quadro é predefinição (`png`/`jpg`), não ferramenta separada. Instagram horizontal usa fundo desfocado por padrão. O painel da janela é uma sobreposição (como o de metadados), para aparecer no `capturar`.
 - 2026-11-10: combinação inválida de predefinição e extensão (ex.: youtube → `.webm`, whatsapp → `.gif`) dá erro claro em vez de trocar a extensão: o destino pedido nunca é alterado em silêncio. Largura/altura ímpares são arredondadas para par. Foto em 'fim' ou além do fim = último quadro (com aviso se passou), descontando o atraso do vídeo no contêiner como `congelar_quadro`. Trecho com fim ≤ início é erro; trecho cortado pelo fim do vídeo gera aviso. Pelo MCP, se `arquivo` não é o vídeo da janela, tempos relativos à janela ('m1', 'atual', 'in'...) são erro.
+
+- 2026-11-10: Fase 7 com SAM 2.1 só de imagem + rastreamento quadro a quadro (sem a memória de vídeo do SAM 2, ausente nos exports ONNX confiáveis); remoção padrão por "fundo visto mais recente" + LaMa uma vez (câmera parada), LaMa por quadro só para câmera em movimento; máscaras no cache, fora de `.versoes/`; ferramentas longas viram tarefas após 50 s de espera.
 
 ## 8. Questões em aberto
 - Manter o idioma da interface em português ou adicionar i18n desde já?

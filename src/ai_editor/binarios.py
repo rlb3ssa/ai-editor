@@ -74,7 +74,9 @@ REGISTRO: dict[str, Ferramenta] = {f.nome: f for f in [
                obrigatoria=False, versao_cmd=["--version"],
                dica="baixe em github.com/contentauth/c2pa-rs/releases e coloque em ~/.local/bin"),
     Ferramenta("whisper-cli", "legendas e transcrição (whisper.cpp)", "MIT",
-               obrigatoria=False, sob_demanda=True, versao_cmd=["--help"]),
+               obrigatoria=False, sob_demanda=True, versao_cmd=["--version"],
+               versao_rx=r"version:\s*([\w.\-]+)",
+               dica="compile o whisper.cpp fixado (1–2 min, sem sudo): python -m ai_editor.fala --instalar-whisper"),
 ]}
 
 # Recursos do ffmpeg usados (ou planejados) pelo app: (tipo, nome, obrigatório?, para quê)
