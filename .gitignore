@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Ambiente virtual
+.venv
+
+# Versões temporárias de edição geradas ao lado dos vídeos
+.*.versoes/
+
+# Empacotamento
+*.AppImage
+AppDir/
+squashfs-root/
+
+# Modelos de IA baixados sob demanda
+modelos/
