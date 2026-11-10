@@ -5,7 +5,11 @@
 #
 # Requisitos (Ubuntu 24.04): uv, libmpv2, mediainfo, perl, patchelf (ou uvx), curl, xz-utils, dpkg.
 # Downloads e arquivos intermediários ficam em $AI_EDITOR_BUILD_DIR (padrão ~/.cache/ai-editor-build), fora do repo.
-# Variáveis úteis: FFMPEG_TAG, EXIFTOOL_VERSAO, C2PATOOL_VERSAO, JOBS (paralelismo do mksquashfs).
+# Variáveis úteis: FFMPEG_ORIGEM, COMP, JOBS (paralelismo do mksquashfs).
+#
+# Tudo o que é baixado tem versão fixa e é conferido com packaging/SHA256SUMS (sha256sum -c) logo após o download.
+# Para atualizar um componente: troque a versão abaixo, rode `packaging/build_appimage.sh --atualizar-sums` (baixa e
+# grava os novos hashes; confira-os com os publicados pelo projeto de origem) e commite os dois arquivos juntos.
 set -euo pipefail
 export LC_ALL=C.UTF-8   # o PyInstaller lê a saída do ldconfig e não entende mensagens traduzidas
 
@@ -19,20 +23,32 @@ JOBS="${JOBS:-4}"
 # FFMPEG_ORIGEM=btbn (padrão): build GPL do FFmpeg-Builds, versão nova e independente do sistema.
 # FFMPEG_ORIGEM=sistema: ffmpeg/ffprobe do Ubuntu, que reaproveitam as libav* já trazidas pela libmpv (AppImage ~70 MB menor).
 FFMPEG_ORIGEM="${FFMPEG_ORIGEM:-btbn}"
-FFMPEG_TAG="${FFMPEG_TAG:-n8.1}"   # build "shared" GPL do FFmpeg-Builds (BtbN): libs autocontidas, ~3x menor que 2 estáticos
-FFMPEG_ARQ="ffmpeg-${FFMPEG_TAG}-latest-linux64-gpl-shared-${FFMPEG_TAG#n}.tar.xz"
-FFMPEG_URL="https://github.com/FFmpeg-Builds/FFmpeg-Builds/releases/download/latest/$FFMPEG_ARQ"
-EXIFTOOL_VERSAO="${EXIFTOOL_VERSAO:-13.62}"
-C2PATOOL_VERSAO="${C2PATOOL_VERSAO:-0.27.22}"
+# Build "shared" GPL do FFmpeg-Builds (BtbN): libs autocontidas, ~3x menor que 2 estáticos. Release DATADO (o "latest"
+# muda todo dia). O BtbN apaga autobuilds antigos depois de algumas semanas: se o download sumir, mude para um release
+# novo (FFMPEG_RELEASE, FFMPEG_ARQ e FFMPEG_RECEITA = commit da tag) e atualize o SHA256SUMS.
+FFMPEG_RELEASE="autobuild-2026-11-09-12-42"
+FFMPEG_RECEITA="c9fe5114060e507409f7ee07edfd82efaf25d767"   # commit do BtbN/FFmpeg-Builds desse release
+FFMPEG_ARQ="ffmpeg-n8.1.3-34-ga35157abb9-linux64-gpl-shared-8.1.tar.xz"
+FFMPEG_URL="https://github.com/BtbN/FFmpeg-Builds/releases/download/$FFMPEG_RELEASE/$FFMPEG_ARQ"
+EXIFTOOL_VERSAO="13.62"
+C2PATOOL_VERSAO="0.27.22"
 C2PATOOL_URL="https://github.com/contentauth/c2pa-rs/releases/download/c2patool-v${C2PATOOL_VERSAO}/c2patool-v${C2PATOOL_VERSAO}-x86_64-unknown-linux-gnu.tar.gz"
-APPIMAGETOOL_URL="https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage"
+APPIMAGETOOL_VERSAO="1.9.1"
+APPIMAGETOOL_URL="https://github.com/AppImage/appimagetool/releases/download/$APPIMAGETOOL_VERSAO/appimagetool-x86_64.AppImage"
+RUNTIME_VERSAO="20251108"   # runtime type2 embutido no AppImage (sem isso o appimagetool baixa o "continuous")
+RUNTIME_URL="https://github.com/AppImage/type2-runtime/releases/download/$RUNTIME_VERSAO/runtime-x86_64"
+SUMS="$RAIZ/packaging/SHA256SUMS"
+ATUALIZAR_SUMS=0
+[ "${1:-}" = --atualizar-sums ] && ATUALIZAR_SUMS=1
 ATUALIZACAO="gh-releases-zsync|rlb3ssa|ai-editor|latest|AI_Editor-*x86_64.AppImage.zsync"
 
 VERSAO="$(sed -n 's/^version = "\(.*\)"/\1/p' "$RAIZ/pyproject.toml" | head -1)"
 SAIDA="$DIST/AI_Editor-${VERSAO}-x86_64.AppImage"
 
 # Bibliotecas que NÃO vão no AppImage: base do sistema e as que precisam casar com o driver/servidor gráfico/de som.
-EXCLUIR='^(ld-linux|linux-vdso|libc\.so|libm\.so|libmvec|libdl\.so|libpthread|librt\.so|libresolv|libutil\.so|libcrypt\.so|libstdc\+\+|libgcc_s|libGL|libEGL|libGLX|libGLdispatch|libOpenGL|libgbm|libdrm|libva|libvdpau|libX11|libXext\.|libXau\.|libXdmcp|libXrender|libXfixes|libXi\.|libXcursor|libXrandr|libxcb|libxkbcommon|libwayland|libasound|libpulse|libpipewire|libfontconfig|libfreetype|libharfbuzz|libexpat|libz\.so|libdbus-1|libsystemd|libudev|libgpg-error|libcom_err|libuuid|libselinux|libICE|libSM|libusb)'
+# Exceção proposital: a família xcb-util (libxcb-cursor, -icccm, -image, -keysyms, -render-util, -util) VAI no pacote —
+# o plugin xcb do Qt ≥ 6.5 precisa da libxcb-cursor0, que falta em muitas instalações (o programa nem abriria).
+EXCLUIR='^(ld-linux|linux-vdso|libc\.so|libm\.so|libmvec|libdl\.so|libpthread|librt\.so|libresolv|libutil\.so|libcrypt\.so|libstdc\+\+|libgcc_s|libGL|libEGL|libGLX|libGLdispatch|libOpenGL|libgbm|libdrm|libva|libvdpau|libX11|libXext\.|libXau\.|libXdmcp|libXrender|libXfixes|libXi\.|libXcursor|libXrandr|libxcb(\.so|-(composite|damage|dpms|dri2|dri3|glx|present|randr|record|render|res|screensaver|shape|shm|sync|xf86dri|xfixes|xinerama|xinput|xkb|xtest|xv|xvmc)\.so)|libxkbcommon|libwayland|libasound|libpulse|libpipewire|libfontconfig|libfreetype|libharfbuzz|libexpat|libz\.so|libdbus-1|libsystemd|libudev|libgpg-error|libcom_err|libuuid|libselinux|libICE|libSM|libusb)'
 
 msg() { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 memoria() { awk '/MemAvailable/ {printf "    (memória disponível: %d MB)\n", $2/1024}' /proc/meminfo; }
@@ -40,12 +56,29 @@ memoria() { awk '/MemAvailable/ {printf "    (memória disponível: %d MB)\n", $
 PATCHELF="$(command -v patchelf || true)"
 [ -n "$PATCHELF" ] || PATCHELF="uvx --from patchelf patchelf"
 
-baixar() {  # baixar URL ARQUIVO — só baixa se ainda não estiver no cache
-    local url="$1" arq="$DL/$2"
+conferir() {  # conferir ARQUIVO — confere o hash com packaging/SHA256SUMS (ou o registra, com --atualizar-sums)
+    local nome="$1"
+    if [ $ATUALIZAR_SUMS = 1 ]; then
+        { grep -v "  $nome\$" "$SUMS" 2>/dev/null || true; (cd "$DL" && sha256sum "$nome"); } | sort -k2 > "$SUMS.novo"
+        mv "$SUMS.novo" "$SUMS"
+        return 0
+    fi
+    grep -q "  $nome\$" "$SUMS" || { echo "    $nome não está em packaging/SHA256SUMS (use --atualizar-sums)"; return 1; }
+    (cd "$DL" && grep "  $nome\$" "$SUMS" | sha256sum -c --quiet -)
+}
+
+baixar() {  # baixar URL ARQUIVO — só baixa se ainda não estiver no cache; sempre confere o SHA-256
+    local url="$1" nome="$2" arq="$DL/$2"
     if [ ! -s "$arq" ]; then
         echo "    baixando $url"
-        curl -fL --retry 3 -o "$arq.part" "$url"
+        rm -f "$arq.part"
+        curl -fL --retry 3 -o "$arq.part" "$url" || { rm -f "$arq.part"; return 1; }
         mv "$arq.part" "$arq"
+    fi
+    if ! conferir "$nome"; then
+        echo "    SHA-256 de $nome não confere: arquivo removido do cache (download truncado ou alterado)" >&2
+        rm -f "$arq"
+        return 1
     fi
 }
 
@@ -70,21 +103,35 @@ msg "Baixando componentes (cache em $DL)"
 baixar "https://sourceforge.net/projects/exiftool/files/Image-ExifTool-${EXIFTOOL_VERSAO}.tar.gz/download" "exiftool-${EXIFTOOL_VERSAO}.tar.gz" \
     || baixar "https://exiftool.org/Image-ExifTool-${EXIFTOOL_VERSAO}.tar.gz" "exiftool-${EXIFTOOL_VERSAO}.tar.gz"
 baixar "$C2PATOOL_URL" "c2patool-${C2PATOOL_VERSAO}.tar.gz"
-baixar "$APPIMAGETOOL_URL" "appimagetool-x86_64.AppImage"
-chmod +x "$DL/appimagetool-x86_64.AppImage"
+APPIMAGETOOL="$DL/appimagetool-${APPIMAGETOOL_VERSAO}-x86_64.AppImage"
+baixar "$APPIMAGETOOL_URL" "$(basename "$APPIMAGETOOL")"
+chmod +x "$APPIMAGETOOL"
+baixar "$RUNTIME_URL" "runtime-${RUNTIME_VERSAO}-x86_64"
+if [ $ATUALIZAR_SUMS = 1 ]; then
+    echo "packaging/SHA256SUMS atualizado:"; cat "$SUMS"; exit 0
+fi
 ZSYNCMAKE="$(command -v zsyncmake || true)"
-if [ -z "$ZSYNCMAKE" ]; then  # sem sudo: extrai o zsyncmake do pacote .deb do Ubuntu
+if [ -z "$ZSYNCMAKE" ]; then  # sem sudo: extrai o zsyncmake do pacote .deb do Ubuntu (apt confere a assinatura)
     if [ ! -x "$DL/zsync/usr/bin/zsyncmake" ]; then
         (cd "$DL" && apt-get download zsync >/dev/null && dpkg-deb -x zsync_*.deb zsync)
     fi
     ZSYNCMAKE="$DL/zsync/usr/bin/zsyncmake"
+fi
+# Receita do FFmpeg-Builds no commit do release (lista das bibliotecas embutidas no ffmpeg, com repositório e commit).
+# Buscada por hash de commit: o git garante a integridade.
+RECEITA="$BUILD/btbn-receita"
+if [ "$FFMPEG_ORIGEM" != sistema ] && [ "$(git -C "$RECEITA" rev-parse HEAD 2>/dev/null)" != "$FFMPEG_RECEITA" ]; then
+    rm -rf "$RECEITA" && mkdir -p "$RECEITA"
+    git -C "$RECEITA" init -q
+    git -C "$RECEITA" fetch -q --depth 1 https://github.com/BtbN/FFmpeg-Builds "$FFMPEG_RECEITA"
+    git -C "$RECEITA" checkout -q FETCH_HEAD
 fi
 
 # ---------------------------------------------------------------- Python + Qt (PyInstaller, one-dir)
 msg "PyInstaller (one-dir)"
 memoria
 cd "$RAIZ"
-uv sync --frozen 2>/dev/null || uv sync
+uv sync --frozen
 EXCLUIR_PY=()
 for m in QtWebEngineCore QtWebEngineWidgets QtWebEngineQuick QtWebChannel QtWebSockets QtWebView \
          Qt3DCore Qt3DRender Qt3DInput Qt3DLogic Qt3DExtras Qt3DAnimation QtQuick QtQuick3D QtQuickWidgets \
@@ -144,7 +191,7 @@ if [ "$FFMPEG_ORIGEM" = sistema ]; then
     FFMPEG_ARQ="pacote ffmpeg do Ubuntu (ver lista de bibliotecas abaixo)"
 else
 # ffmpeg/ffprobe (com as libs próprias, isoladas em usr/lib/ffmpeg; RPATH $ORIGIN/../lib já vem do build)
-msg "ffmpeg $FFMPEG_TAG"
+msg "ffmpeg ($FFMPEG_RELEASE)"
 rm -rf "$BUILD/ffmpeg-x" && mkdir -p "$BUILD/ffmpeg-x"
 tar xf "$DL/$FFMPEG_ARQ" -C "$BUILD/ffmpeg-x"
 FF="$(ls -d "$BUILD"/ffmpeg-x/*/)"
@@ -156,6 +203,23 @@ done
 ln -s ../lib/ffmpeg/bin/ffmpeg "$APPDIR/usr/bin/ffmpeg"
 ln -s ../lib/ffmpeg/bin/ffprobe "$APPDIR/usr/bin/ffprobe"
 cp "$FF/LICENSE.txt" "$APPDIR/usr/share/doc/ai-editor/ffmpeg-LICENSE.txt"
+# O tarball do BtbN só traz o LICENSE.txt do FFmpeg; as bibliotecas linkadas estaticamente nas libav* (x264, x265,
+# libvpx, dav1d...) vêm da receita: registra repositório + commit de cada uma e copia a licença da própria receita.
+mkdir -p "$APPDIR/usr/share/doc/ai-editor/ffmpeg"
+cp "$RECEITA/LICENSE" "$APPDIR/usr/share/doc/ai-editor/ffmpeg/FFmpeg-Builds-LICENSE"
+{
+    echo "# Bibliotecas da receita BtbN/FFmpeg-Builds @ $FFMPEG_RECEITA ($FFMPEG_RELEASE, variante linux64-gpl-shared)"
+    echo "# Receita: https://github.com/BtbN/FFmpeg-Builds/tree/$FFMPEG_RECEITA"
+    echo "# Nem todas entram na variante linux64; as habilitadas aparecem em \`ffmpeg -version\` (configuration)."
+    echo "# Cada linha: script da receita, repositório (código-fonte) e commit usados."
+    echo "# Textos das licenças comuns (GPL/LGPL/BSD/Apache/MPL): usr/share/doc/ai-editor/licencas-comuns/"
+    find "$RECEITA/scripts.d" -name '*.sh' | sort | while read -r sc; do
+        repo="$(sed -n 's/^SCRIPT_REPO="\(.*\)"/\1/p' "$sc" | head -1)"
+        com="$(sed -n 's/^SCRIPT_\(COMMIT\|REV\|TAG\)="\(.*\)"/\2/p' "$sc" | head -1)"
+        if [ -n "$repo" ]; then printf '%s\t%s\t%s\n' "${sc#"$RECEITA"/scripts.d/}" "$repo" "$com"; fi
+    done
+} > "$APPDIR/usr/share/doc/ai-editor/ffmpeg/BIBLIOTECAS.tsv"
+"$APPDIR/usr/bin/ffmpeg" -hide_banner -version > "$APPDIR/usr/share/doc/ai-editor/ffmpeg/VERSAO.txt"
 FFMPEG_VER="$("$APPDIR/usr/bin/ffmpeg" -hide_banner -version | sed -n '1s/ffmpeg version \([^ ]*\).*/\1/p')"
 fi
 
@@ -218,17 +282,50 @@ cp "$RAIZ/LICENSE" "$DOC/LICENSE"
 cp "$RAIZ/packaging/LICENCAS_TERCEIROS.md" "$DOC/"
 cp "$ET/README" "$DOC/exiftool-README" 2>/dev/null || true
 cp "$BUILD/c2patool/README.md" "$DOC/c2patool-README.md"
+# Textos das licenças comuns (o Qt/PySide6/shiboken6 são LGPL-3.0 — as wheels não trazem o texto — e várias libs do
+# ffmpeg e do Ubuntu são GPL/LGPL/BSD/Apache/MPL).
+mkdir -p "$DOC/licencas-comuns"
+for l in GPL-2 GPL-3 LGPL-2.1 LGPL-3 Apache-2.0 BSD MPL-2.0 Artistic; do
+    cp -L "/usr/share/common-licenses/$l" "$DOC/licencas-comuns/$l"
+done
+# Pacotes Python embutidos: os arquivos de licença dos dist-info (PySide6/shiboken6: LGPL-3 acima + o campo License).
+mkdir -p "$DOC/python"
+SITE="$(cd "$RAIZ" && uv run --frozen python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
+(cd "$RAIZ" && uv export --frozen --no-dev --no-hashes --no-emit-project --no-header) | grep -v '^ *#' \
+    | sed -n 's/^\([A-Za-z0-9_.-]*\)==\([^ ;]*\).*/\1 \2/p' | while read -r pkg ver; do
+    norm="$(echo "$pkg" | tr 'A-Z.-' 'a-z__')"
+    di="$(find "$SITE" -maxdepth 1 -iname "${norm}-${ver}.dist-info" | head -1)"
+    [ -n "$di" ] || continue
+    mkdir -p "$DOC/python/$pkg"
+    grep -m1 -E '^License(-Expression)?:' "$di/METADATA" > "$DOC/python/$pkg/METADATA-licenca.txt" || true
+    find "$di" \( -iname 'LICEN[CS]E*' -o -iname 'COPYING*' -o -iname 'NOTICE*' -o -iname 'AUTHORS*' \) -type f \
+        -exec cp {} "$DOC/python/$pkg/" \;
+    if [ -d "$di/licenses" ]; then cp -r "$di/licenses/." "$DOC/python/$pkg/"; fi
+done
+for d in "$DOC"/python/pyside6* "$DOC"/python/shiboken6; do
+    if [ -d "$d" ]; then cp "$DOC/licencas-comuns/LGPL-3" "$DOC/licencas-comuns/GPL-3" "$d/"; fi
+done
 # Inventário exato do que foi empacotado (versões, pacotes Debian de origem e links para o código-fonte).
 {
     echo "# Componentes deste AppImage (gerado em $(date -u +%Y-%m-%dT%H:%MZ) por packaging/build_appimage.sh)"
     echo
     echo "AI Editor $VERSAO — GPL-3.0-or-later — https://github.com/rlb3ssa/ai-editor"
-    echo "ffmpeg/ffprobe $FFMPEG_VER — GPL-3.0 (build $FFMPEG_ARQ) — fonte: https://github.com/FFmpeg/FFmpeg ; receita: https://github.com/BtbN/FFmpeg-Builds"
+    if [ "$FFMPEG_ORIGEM" = sistema ]; then
+        echo "ffmpeg/ffprobe $FFMPEG_VER — do Ubuntu (ver lista de pacotes abaixo)"
+    else
+        echo "ffmpeg/ffprobe $FFMPEG_VER — GPL-3.0 — build $FFMPEG_ARQ do release $FFMPEG_RELEASE"
+        echo "    https://github.com/BtbN/FFmpeg-Builds/releases/tag/$FFMPEG_RELEASE"
+        echo "    receita (commit $FFMPEG_RECEITA): https://github.com/BtbN/FFmpeg-Builds/tree/$FFMPEG_RECEITA"
+        echo "    fonte do FFmpeg: https://github.com/FFmpeg/FFmpeg ; bibliotecas embutidas: usr/share/doc/ai-editor/ffmpeg/BIBLIOTECAS.tsv"
+    fi
     echo "exiftool $EXIFTOOL_VERSAO — Artistic/GPL-1.0+ — fonte: https://exiftool.org/ (incluso: usr/lib/exiftool)"
     echo "c2patool $C2PATOOL_VERSAO — MIT/Apache-2.0 — fonte: https://github.com/contentauth/c2pa-rs/tree/c2patool-v$C2PATOOL_VERSAO"
     echo
     echo "## Pacotes Python (embutidos pelo PyInstaller; PySide6 traz o Qt $(uv run --frozen python -c 'import PySide6.QtCore as q; print(q.qVersion())' 2>/dev/null))"
     (cd "$RAIZ" && uv export --frozen --no-dev --no-hashes --no-emit-project --no-header | grep -v '^ *#' | sed 's/ ;.*//')
+    echo
+    echo "AppImage: appimagetool $APPIMAGETOOL_VERSAO, runtime type2 $RUNTIME_VERSAO (MIT) — https://github.com/AppImage"
+    echo "Licenças: usr/share/doc/ai-editor/{licencas-comuns,python,ubuntu,ffmpeg} (dentro do AppImage: --appimage-extract)"
     echo
     echo "## Programas e bibliotecas copiados do Ubuntu $(. /etc/os-release && echo "$VERSION_ID") (libmpv, mediainfo e dependências)"
     echo "Código-fonte de cada pacote: https://launchpad.net/ubuntu/+source/<pacote-fonte>/<versão>"
@@ -243,6 +340,11 @@ cp "$BUILD/c2patool/README.md" "$DOC/c2patool-README.md"
         pkg="$(dpkg -S "$(readlink -f "$lib")" 2>/dev/null | head -1 | sed 's/: .*//')"
         [ -n "$pkg" ] || pkg="$(dpkg -S "$lib" 2>/dev/null | head -1 | sed 's/: .*//')"
         if [ -n "$pkg" ]; then
+            # Licença do pacote Debian (copyright) junto, em usr/share/doc/ai-editor/ubuntu/<pacote>/
+            base="${pkg%%:*}"
+            if [ -f "/usr/share/doc/$base/copyright" ] && [ ! -e "$DOC/ubuntu/$base/copyright" ]; then
+                mkdir -p "$DOC/ubuntu/$base" && cp -L "/usr/share/doc/$base/copyright" "$DOC/ubuntu/$base/copyright"
+            fi
             fonte="$(dpkg-query -W -f='${source:Package} ${source:Version}\n' "$pkg" 2>/dev/null | head -1)"
             echo "$(basename "$lib")  ←  $pkg  (fonte: ${fonte% *} ${fonte#* }: https://launchpad.net/ubuntu/+source/${fonte% *}/${fonte#* })"
         else
@@ -263,9 +365,9 @@ COMP="${COMP:-zstd}"
 OPCOES_COMP=(--comp "$COMP" --mksquashfs-opt -b --mksquashfs-opt 1M)
 [ "$COMP" = zstd ] && OPCOES_COMP+=(--mksquashfs-opt -Xcompression-level --mksquashfs-opt 19)
 # (roda dentro de dist/: o appimagetool grava o .zsync no diretório atual)
-(cd "$DIST" && PATH="$(dirname "$ZSYNCMAKE"):$PATH" "$DL/appimagetool-x86_64.AppImage" --no-appstream \
+(cd "$DIST" && PATH="$(dirname "$ZSYNCMAKE"):$PATH" "$APPIMAGETOOL" --no-appstream \
     --mksquashfs-opt -processors --mksquashfs-opt "$JOBS" "${OPCOES_COMP[@]}" \
-    -u "$ATUALIZACAO" "$APPDIR" "$SAIDA")
+    --runtime-file "$DL/runtime-${RUNTIME_VERSAO}-x86_64" -u "$ATUALIZACAO" "$APPDIR" "$SAIDA")
 if [ ! -f "$SAIDA.zsync" ]; then  # appimagetool sem zsyncmake no PATH: gera aqui
     (cd "$DIST" && "$ZSYNCMAKE" -u "$(basename "$SAIDA")" -o "$(basename "$SAIDA").zsync" "$(basename "$SAIDA")")
 fi

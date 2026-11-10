@@ -250,12 +250,18 @@ Fluxo: o Claude localiza o objeto nos quadros → segmenta e rastreia → mostra
   - **Tamanho: 233 MB** (zstd 19, blocos de 1 MiB). `COMP=xz` ≈ 213 MB (abre mais devagar).
     `FFMPEG_ORIGEM=sistema` (ffmpeg 6.1 do Ubuntu, reaproveitando as libav* da libmpv): **164 MB**, com todos os recursos
     do diagnóstico ✔ — alternativa se o tamanho importar mais que ter o ffmpeg 8.
-  - ffmpeg = build GPL **"shared"** do FFmpeg-Builds (BtbN) n8.1, isolado em `usr/lib/ffmpeg` (RPATH próprio): 2 executáveis
+  - Downloads com versão fixa e conferidos com `packaging/SHA256SUMS` (`sha256sum -c`; hash errado/download truncado
+    apaga o arquivo do cache e para o build): FFmpeg do release datado `autobuild-2026-11-09-12-42` (receita BtbN
+    `c9fe511`), exiftool 13.62, c2patool 0.27.22, appimagetool 1.9.1 + runtime type2 `20251108`. Trocar versão:
+    editar o script e rodar `build_appimage.sh --atualizar-sums`. O BtbN apaga autobuilds antigos: quando o release
+    sumir, atualizar para um novo. `uv sync --frozen` sem fallback.
+  - ffmpeg = build GPL **"shared"** do FFmpeg-Builds (BtbN) n8.1.3, isolado em `usr/lib/ffmpeg` (RPATH próprio): 2 executáveis
     estáticos ocupariam ~3x mais. Tem x264, x265, libvpx, opus, SVT-AV1, LAME, ProRes, libass, rubberband, arnndn;
     **não** tem o filtro `whisper` (`--disable-whisper` nos builds do BtbN).
   - libmpv/mediainfo vêm do Ubuntu 24.04 com as dependências (ldd), RPATH via patchelf; ficam de fora libc, libstdc++,
-    GL/EGL/DRM/GBM, VA-API/VDPAU, X11/xcb núcleo, Wayland, ALSA/Pulse/PipeWire, fontconfig/freetype/harfbuzz, zlib,
+    GL/EGL/DRM/GBM, VA-API/VDPAU, X11/libxcb e extensões de protocolo, Wayland, ALSA/Pulse/PipeWire, fontconfig/freetype/harfbuzz, zlib,
     D-Bus/systemd/udev (precisam casar com o sistema). Requer glibc ≥ 2.39 (build no Ubuntu 24.04).
+    A família xcb-util (libxcb-cursor0 etc.) vai no pacote: o plugin xcb do Qt ≥ 6.5 não abre sem ela.
   - exiftool: código Perl em `usr/lib/exiftool` + wrapper que usa o `perl` do sistema.
   - Testado: `--versao` (0,6 s), `--diagnostico` (tudo `[pacote]`), janela com vídeo (VAAPI ativo, ícones e ondas ok),
     `estado`/`capturar`/`sair` pelo socket `ai-editor`, `--mcp` (initialize, 21 ferramentas, `metadados` com
@@ -265,22 +271,45 @@ Fluxo: o Claude localiza o objeto nos quadros → segmenta e rastreia → mostra
 - [x] `ai-editor --instalar` (`instalador.py`, só stdlib): atalho `~/.local/bin/ai-editor` (AppImage), `.desktop` + ícone SVG,
   tipos MIME de vídeo/áudio em `~/.config/mimeapps.list` (lista explícita; `--sem-mime`), MCP no Claude Code
   (`claude mcp add --scope user`, ou `~/.claude.json` se não houver o comando; pula se não houver Claude Code) e no
-  Claude Desktop (`~/.config/Claude/claude_desktop_config.json`, se a pasta existir). Backup `*.ai-editor.bak`,
-  gravação atômica, manifesto `~/.local/share/ai-editor/instalacao.json` com o valor anterior de cada item.
-  Respeita o modo dev (`ai-editor-dev`, `instalacao-dev.json`). Testado em HOME falso: instalar 2x, restauração idêntica.
-- [x] `--desinstalar` simétrico (restaura MIME/registros anteriores, só onde ninguém mudou depois).
+  Claude Desktop (`~/.config/Claude/claude_desktop_config.json`, se a pasta existir). Respeita o modo dev
+  (`ai-editor-dev`, `instalacao-dev.json`).
+  - Transacional (revisão de 2026-11-10): o manifesto `~/.local/share/ai-editor/instalacao.json` é gravado **antes**
+    de cada alteração, já com o valor anterior; falha no meio (permissão, timeout do `claude`, Ctrl+C) deixa o
+    manifesto coerente e o comando sai com código ≠ 0. Reinstalar com o manifesto perdido não perde o original: se o
+    valor atual já é nosso, o anterior vem do backup `*.ai-editor.bak`, que guarda só o **primeiro** original
+    (nunca é sobrescrito) e é apagado no `--desinstalar` bem-sucedido. Manifesto ilegível → renomeado para
+    `.corrompido-<data>`, com aviso.
+  - Arquivos de configuração que são links simbólicos (dotfiles) são gravados no destino real (o link continua link);
+    gravação atômica com `mkstemp` no mesmo diretório, mesmas permissões do original (0600 continua 0600), `fsync`.
+  - `claude mcp remove` + `add`: se o `add` falha, o registro anterior volta com `add-json`. Procura o `claude` no PATH e
+    em `~/.claude/local/claude`; sem ele, edita `~/.claude.json` e avisa para fechar as sessões do Claude Code.
+  - Com AppImage, o `.desktop` (`Exec`/`TryExec`) e o MCP usam o atalho estável `~/.local/bin/ai-editor` (trocar o
+    AppImage de lugar/versão = refazer só o link). `Exec` escapado conforme a especificação Desktop Entry.
+  - Testado em HOMEs falsos com um `claude` simulado: dotfiles por link, falha no meio + manifesto perdido,
+    falha do `mcp add`, manifesto corrompido, seção `[Default Applications]` criada por nós, caminho com espaço/`$`.
+- [x] `--desinstalar` simétrico (restaura MIME/registros anteriores, só onde ninguém mudou depois; o que não deu certo
+  fica no manifesto para a próxima tentativa; remove a seção `[Default Applications]` vazia criada por nós; volta o
+  arquivo byte a byte quando o resultado equivale ao original). `ai-editor -- -arquivo.mp4` abre nomes que começam com `-`.
 - [x] Bundle `.mcpb` (MCPB 0.3, tipo `binary`, validado contra o schema oficial): lançador que executa
-  `~/.local/bin/ai-editor --mcp` (ou o AppImage em ~/Applications, ~/Downloads). `packaging/mcpb/empacotar_mcpb.py`
+  `$AI_EDITOR_APPIMAGE`, `~/.local/bin/ai-editor` ou o AppImage mais recente de `~/Applications` com `--mcp` (nunca
+  ~/Downloads nem o PATH). `packaging/mcpb/empacotar_mcpb.py`
   lê a versão e a lista de ferramentas do próprio servidor.
 - [x] GitHub Actions: `release.yml` (tag `v*` → build, testes do AppImage, SHA256SUMS, Release com AppImage, .zsync,
   .mcpb, COMPONENTES.txt, LICENCAS_TERCEIROS.md) e `ci.yml` (push/PR em dev/main: compileall, testes, instalador em
-  HOME falso, initialize do MCP). Ainda não rodaram no GitHub.
-- [x] `deploy.sh X.Y.Z [--dry-run] [--push]`: confere main limpa, compileall, sobe a versão, commit + tag; push só com `--push`.
+  HOME falso, initialize do MCP). Ainda não rodaram no GitHub. Endurecidos: actions fixadas por SHA (comentário com a
+  versão), `persist-credentials: false`, permissões só de leitura; a publicação é um job separado (o único com
+  `contents: write`) que recebe `dist/` como artefato e confere o SHA256SUMS.
+- [x] `deploy.sh X.Y.Z [--dry-run] [--push]`: confere main limpa, sintaxe, sobe a versão, commit + tag; push só com `--push`.
+  `--dry-run` não altera nada (sem `uv`, sintaxe conferida com `compile()` em memória, sem `__pycache__`). Aceita só
+  `X.Y.Z` e pré-lançamentos PEP 440 normalizados (`X.Y.ZaN/bN/rcN`), comparados na ordem PEP 440 (`1.0.0rc1 < 1.0.0`).
 - [x] Atualização via zsync: informação `gh-releases-zsync|rlb3ssa|ai-editor|latest|AI_Editor-*x86_64.AppImage.zsync`
   embutida e `.zsync` gerado (zsyncmake extraído do .deb do Ubuntu quando não instalado).
 - [x] Conformidade GPL: `packaging/LICENCAS_TERCEIROS.md` (licenças, links de fonte, oferta escrita) e `COMPONENTES.txt`
   gerado no build (versões exatas, pacote Debian de origem e link Launchpad de cada `.so`), ambos em
-  `usr/share/doc/ai-editor/` dentro do AppImage. Releases devem sair do CI: na máquina local alguns pacotes são
+  `usr/share/doc/ai-editor/` dentro do AppImage, junto com os textos das licenças: `licencas-comuns/` (GPL/LGPL/
+  Apache/BSD/MPL/Artistic), `python/<pacote>/` (dist-info; PySide6/shiboken6 com a LGPL-3), `ubuntu/<pacote>/copyright`
+  de cada pacote do Ubuntu e `ffmpeg/BIBLIOTECAS.tsv` (repositório + commit de cada biblioteca da receita BtbN).
+  Releases devem sair do CI: na máquina local alguns pacotes são
   versões ESM (Ubuntu Pro), cujo fonte não é público no Launchpad.
 - [ ] Testar numa sessão Wayland real.
 - [ ] Reduzir mais: compilar a libmpv contra as libav* do build do BtbN (eliminaria a segunda cópia do ffmpeg, ~70 MB).
@@ -308,7 +337,7 @@ Decidido em 2026-11-09. Registro em `src/ai_editor/binarios.py` (`REGISTRO` e `R
 ### 5.1 Embutido no pacote (offline desde o primeiro uso)
 | Ferramenta | Para quê | Licença | Tamanho aprox. |
 |---|---|---|---|
-| ffmpeg + ffprobe (build GPL "shared" do FFmpeg-Builds n8.1, isolado em `usr/lib/ffmpeg`) | edições, análise, exportação. Precisa de: libx264, libvpx-vp9, libopus, aac. Desejável: libx265, libsvtav1, libmp3lame, prores_ks, libass (`subtitles`), rubberband, arnndn | GPL-3.0 | ~220 MB descomp. |
+| ffmpeg + ffprobe (build GPL "shared" do FFmpeg-Builds n8.1.3, release `autobuild-2026-11-09-12-42`, isolado em `usr/lib/ffmpeg`) | edições, análise, exportação. Precisa de: libx264, libvpx-vp9, libopus, aac. Desejável: libx265, libsvtav1, libmp3lame, prores_ks, libass (`subtitles`), rubberband, arnndn | GPL-3.0 | ~220 MB descomp. |
 | libmpv + dependências | reprodução com aceleração por hardware | GPL/LGPL | ~40 MB |
 | mediainfo | metadados detalhados | BSD-2 | ~10 MB |
 | exiftool | metadados de câmera/GPS/XMP; usa o Perl do sistema (o pacote não leva Perl) | Artistic/GPL | ~21 MB |

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import sys
 import zipfile
@@ -35,7 +36,7 @@ def main() -> int:
     manifesto = json.loads((AQUI / "manifest.json").read_text(encoding="utf-8"))
     manifesto["version"] = versao()
     manifesto["tools"] = ferramentas()
-    dist = RAIZ / "dist"
+    dist = Path(os.environ.get("AI_EDITOR_DIST") or RAIZ / "dist")
     dist.mkdir(exist_ok=True)
     saida = dist / f"ai-editor-{manifesto['version']}.mcpb"
 

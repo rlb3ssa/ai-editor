@@ -1,12 +1,30 @@
 #!/bin/sh
 # Lançador do servidor MCP do AI Editor para o Claude Desktop (bundle .mcpb).
 # O bundle não leva o programa: usa o AppImage instalado com `AI_Editor-*.AppImage --instalar`.
-for exe in "$AI_EDITOR_APPIMAGE" "$HOME/.local/bin/ai-editor" "$(command -v ai-editor 2>/dev/null)" \
-           $(ls -t "$HOME"/Applications/AI_Editor-*.AppImage "$HOME"/Downloads/AI_Editor-*.AppImage 2>/dev/null); do
-    if [ -n "$exe" ] && [ -x "$exe" ]; then
-        exec "$exe" --mcp
+# Procura só em lugares de instalação (nunca em ~/Downloads nem no PATH), nesta ordem:
+#   1. $AI_EDITOR_APPIMAGE (caminho explícito)
+#   2. ~/.local/bin/ai-editor (atalho criado pelo --instalar)
+#   3. ~/Applications/AI_Editor-*.AppImage (o mais recente)
+
+rodar() {
+    if [ -n "$1" ] && [ -f "$1" ] && [ -x "$1" ]; then
+        exec "$1" --mcp
+    fi
+}
+
+rodar "${AI_EDITOR_APPIMAGE:-}"
+rodar "$HOME/.local/bin/ai-editor"
+
+recente=""
+for arq in "$HOME"/Applications/AI_Editor-*.AppImage; do
+    [ -f "$arq" ] && [ -x "$arq" ] || continue
+    if [ -z "$recente" ] || [ "$arq" -nt "$recente" ]; then
+        recente="$arq"
     fi
 done
+rodar "$recente"
+
 echo "AI Editor não encontrado. Baixe o AppImage em https://github.com/rlb3ssa/ai-editor/releases e rode:" >&2
 echo "  chmod +x AI_Editor-*.AppImage && ./AI_Editor-*.AppImage --instalar" >&2
+echo "(ou guarde o AppImage em ~/Applications, ou defina AI_EDITOR_APPIMAGE com o caminho dele)" >&2
 exit 1

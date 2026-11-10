@@ -35,19 +35,24 @@ com glibc 2.39 ou mais nova (Ubuntu 24.04, Fedora 40, Debian 13...) e do `perl` 
    O `--instalar` cria o atalho `~/.local/bin/ai-editor`, o item no menu de aplicativos, associa os tipos de
    vídeo/áudio ao AI Editor (`--sem-mime` para não associar) e registra o servidor MCP no **Claude Code**
    (`claude mcp add --scope user ai-editor`) e no **Claude Desktop**, se estiverem instalados (`--sem-claude` para pular).
-   Tudo fica no seu diretório pessoal, sem `sudo`; os arquivos de configuração alterados ganham uma cópia `*.ai-editor.bak`.
+   Tudo fica no seu diretório pessoal, sem `sudo`; antes de alterar um arquivo de configuração é guardada uma cópia do
+   original (`*.ai-editor.bak`, apagada pelo `--desinstalar`). O menu e o MCP apontam para o atalho
+   `~/.local/bin/ai-editor`: se mudar o AppImage de lugar ou de versão, rode `--instalar` de novo pelo arquivo novo.
 3. No Claude Code, rode `/mcp` (ou abra uma sessão nova); no Claude Desktop, reinicie o aplicativo.
 
 Outros comandos:
 ```bash
-ai-editor video.mp4            # abre a janela
+ai-editor video.mp4            # abre a janela (nome começando com "-": ai-editor -- -video.mp4)
 ai-editor --diagnostico        # ferramentas encontradas (no AppImage, todas vêm do pacote)
 ai-editor --desinstalar        # desfaz o --instalar (restaura associações e registros anteriores)
 ai-editor --versao
 ```
 **Atualizar:** o AppImage traz a informação de atualização (zsync); use o
-[AppImageUpdate](https://github.com/AppImageCommunity/AppImageUpdate) ou simplesmente troque o arquivo.
-**Claude Desktop:** além do `--instalar`, há o bundle `ai-editor-X.Y.Z.mcpb` na Release (abre o AppImage instalado).
+[AppImageUpdate](https://github.com/AppImageCommunity/AppImageUpdate) ou simplesmente troque o arquivo
+(e rode `--instalar` pelo arquivo novo, para o atalho apontar para ele).
+**Claude Desktop:** além do `--instalar`, há o bundle `ai-editor-X.Y.Z.mcpb` na Release. Ele não leva o programa:
+executa `~/.local/bin/ai-editor` (criado pelo `--instalar`), o AppImage indicado em `AI_EDITOR_APPIMAGE` ou o mais
+recente de `~/Applications/`.
 Licenças e código-fonte dos componentes embutidos: `LICENCAS_TERCEIROS.md` e `COMPONENTES.txt` na Release.
 
 ### Gerar o AppImage

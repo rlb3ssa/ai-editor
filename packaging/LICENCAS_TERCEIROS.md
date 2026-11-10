@@ -5,6 +5,24 @@ programa, os componentes abaixo. Cada um continua sob a própria licença; todas
 As versões exatas de cada build estão em `COMPONENTES.txt` (gerado pelo `packaging/build_appimage.sh` e
 incluído no AppImage em `usr/share/doc/ai-editor/` e na página da Release).
 
+### Textos das licenças dentro do AppImage (`usr/share/doc/ai-editor/`, veja com `--appimage-extract`)
+- `LICENSE` — GPL-3.0 do AI Editor; `licencas-comuns/` — GPL-2, GPL-3, LGPL-2.1, LGPL-3, Apache-2.0, BSD, MPL-2.0, Artistic.
+- `python/<pacote>/` — arquivos de licença do `dist-info` de cada pacote Python embutido (+ o campo `License`).
+  PySide6/shiboken6 não trazem o texto nas wheels: a pasta deles recebe a LGPL-3.0 (e a GPL-3.0 que ela incorpora).
+- `ubuntu/<pacote>/copyright` — o arquivo de copyright Debian de cada pacote do Ubuntu listado em `COMPONENTES.txt`.
+- `ffmpeg-LICENSE.txt`, `ffmpeg/BIBLIOTECAS.tsv` (repositório e commit de cada biblioteca da receita),
+  `ffmpeg/VERSAO.txt` (`ffmpeg -version`, com a configuração do build), `ffmpeg/FFmpeg-Builds-LICENSE` (MIT da receita).
+- `exiftool-README`, `c2patool-README.md`.
+
+### Versões fixadas no build (conferidas por SHA-256 com `packaging/SHA256SUMS`)
+| Componente | Versão / origem |
+|---|---|
+| FFmpeg (BtbN) | release datado `autobuild-2026-11-09-12-42`, arquivo `ffmpeg-n8.1.3-34-ga35157abb9-linux64-gpl-shared-8.1.tar.xz` (FFmpeg n8.1.3-34-ga35157abb9) |
+| Receita do FFmpeg-Builds | commit `c9fe5114060e507409f7ee07edfd82efaf25d767` — https://github.com/BtbN/FFmpeg-Builds/tree/c9fe5114060e507409f7ee07edfd82efaf25d767 |
+| ExifTool | 13.62 |
+| c2patool | 0.27.22 |
+| appimagetool / runtime type2 | 1.9.1 / `20251108` |
+
 ## Oferta de código-fonte (GPL, seção 6)
 - **AI Editor**: https://github.com/rlb3ssa/ai-editor — a tag `vX.Y.Z` corresponde exatamente ao AppImage `X.Y.Z`,
   e o script de empacotamento (`packaging/`) faz parte do código-fonte.
@@ -15,7 +33,7 @@ incluído no AppImage em `usr/share/doc/ai-editor/` e na página da Release).
 ## Programas embutidos
 | Componente | Onde fica no AppImage | Licença | Código-fonte |
 |---|---|---|---|
-| FFmpeg (ffmpeg, ffprobe, libav*) — build GPL "shared" do FFmpeg-Builds, com x264, x265, libvpx, opus, SVT-AV1, LAME, libass, rubberband, entre outras | `usr/lib/ffmpeg/` | GPL-3.0 (build com `--enable-gpl --enable-version3`); ver `ffmpeg-LICENSE.txt` | https://github.com/FFmpeg/FFmpeg (tag da versão em `COMPONENTES.txt`); receita do build e versões de cada biblioteca: https://github.com/BtbN/FFmpeg-Builds |
+| FFmpeg (ffmpeg, ffprobe, libav*) — build GPL "shared" do FFmpeg-Builds, com x264, x265, libvpx, opus, SVT-AV1, LAME, libass, rubberband, entre outras | `usr/lib/ffmpeg/` | GPL-3.0 (build com `--enable-gpl --enable-version3`); ver `ffmpeg-LICENSE.txt` | https://github.com/FFmpeg/FFmpeg (commit `a35157abb9`); receita no commit fixado acima, com o repositório e o commit de cada biblioteca em `ffmpeg/BIBLIOTECAS.tsv` |
 | libmpv (mpv) e dependências, do Ubuntu 24.04 | `usr/lib/` | GPL-2.0-or-later (libmpv), demais LGPL/MIT/BSD etc. | https://github.com/mpv-player/mpv ; pacote e versão de cada `.so` em `COMPONENTES.txt`, fonte em https://launchpad.net/ubuntu/+source/ |
 | MediaInfo (CLI) e dependências, do Ubuntu 24.04 | `usr/lib/mediainfo/` | BSD-2-Clause (MediaInfo/MediaInfoLib/ZenLib); dependências em `COMPONENTES.txt` | https://github.com/MediaArea/MediaInfo |
 | ExifTool (Image::ExifTool) | `usr/lib/exiftool/` (o próprio código Perl) | Artistic License ou GPL-1.0-or-later (mesmos termos do Perl) | https://exiftool.org/ — o AppImage já contém o código-fonte completo |
@@ -36,8 +54,10 @@ A lista completa de pacotes Python, com versões, está em `COMPONENTES.txt`.
 
 ## Não incluído (vem do sistema)
 Para funcionar com o driver de vídeo e o servidor gráfico/de som da máquina, o AppImage **usa as bibliotecas do
-sistema** para: glibc, libstdc++, OpenGL/EGL/GBM/DRM, VA-API/VDPAU, X11/xcb, Wayland, ALSA/PulseAudio/PipeWire,
+sistema** para: glibc, libstdc++, OpenGL/EGL/GBM/DRM, VA-API/VDPAU, X11/libxcb e suas extensões de protocolo, Wayland, ALSA/PulseAudio/PipeWire,
 fontconfig/freetype/harfbuzz, zlib, D-Bus/systemd/udev. O **ExifTool** usa o `perl` do sistema.
+A família **xcb-util** (libxcb-cursor, -icccm, -image, -keysyms, -render-util, -util; MIT) **vai** no AppImage: o
+plugin xcb do Qt ≥ 6.5 exige a libxcb-cursor0, que falta em muitas instalações.
 
 ## Ferramentas usadas só para construir (não distribuídas)
 PyInstaller (o bootloader acima é distribuído), appimagetool e runtime do AppImage (MIT;
