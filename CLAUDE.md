@@ -125,7 +125,7 @@ cancelar/fechar/estado, `predefinicao`, `trecho`=índice no combo, `limite_mb`, 
   Quadro ↔ tempo: frames saem em CFR (`-fps_mode cfr -r taxa`), índice i = (t − atraso do vídeo)·fps, e o `-ss` de um
   quadro é 1/4 de quadro antes dele (`_ss_do_quadro`). Máscaras ficam em `~/.cache/ai-editor/mascaras/<hash>/`, NÃO
   em `.versoes/` (o `desfazer` da última versão apaga a pasta toda). LaMa ONNX tem entrada fixa 512x512 (recorte em
-  volta do buraco) e saída já em 0–255; ~7 s/quadro em 4 threads (os dois exports, opencv e Carve, iguais): por isso
+  volta do buraco) e saída já em 0–255; ~4,5–7 s/quadro em 4 threads (os dois exports, opencv e Carve, iguais): por isso
   o padrão para câmera parada é o "fundo visto mais recentemente" + LaMa uma vez no que nunca aparece. Média temporal
   do fundo deixava fantasmas de coisas que passaram. Sem OpenCV: borrão/dilatação por somas acumuladas (`_caixa`).
   Carregar a sessão do LaMa leva ~20–30 s (otimização do grafo); as sessões ficam em cache no processo do MCP.

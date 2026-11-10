@@ -170,7 +170,7 @@ async def controlar(acao: str, valor: str | None = None) -> dict:
 
 
 @ferramenta
-async def marcar(adicionar: list[str] | None = None, remover: list[int] | None = None,
+async def marcar(adicionar: list[str | float] | None = None, remover: list[int] | None = None,
                  limpar: bool = False) -> dict:
     """Marca pontos na régua, como o usuário faz com o botão de seta.
     adicionar: tempos (ex.: ['atual', '1:23.456']); remover: números das marcas (1 = a mais cedo);
@@ -189,7 +189,7 @@ async def mixar(faixa: int, mudo: bool | None = None, solo: bool | None = None,
 
 
 @ferramenta
-async def ver_quadros(tempos: list[str] | None = None, largura: int = 960) -> list:
+async def ver_quadros(tempos: list[str | float] | None = None, largura: int = 960) -> list:
     """Extrai e mostra quadros do vídeo para o Claude enxergar.
     tempos: lista de tempos (padrão: posição atual). Até 12 quadros; com vários, a largura cai para 480."""
     est = _estado()
@@ -210,7 +210,7 @@ async def ver_quadros(tempos: list[str] | None = None, largura: int = 960) -> li
 
 
 @ferramenta
-async def ver_trecho(inicio: str, fim: str, quantidade: int = 8) -> list:
+async def ver_trecho(inicio: str | float, fim: str | float, quantidade: int = 8) -> list:
     """Mostra `quantidade` quadros espaçados igualmente entre inicio e fim (visão geral de um trecho)."""
     est = _estado()
     a, b = _t(inicio, est), _t(fim, est)
@@ -244,7 +244,7 @@ async def metadados(arquivo: str | None = None, profundo: bool = False, hash_sha
 
 
 @ferramenta
-async def analisar_audio(faixa: int = 1, inicio: str | None = None, fim: str | None = None,
+async def analisar_audio(faixa: int = 1, inicio: str | float | None = None, fim: str | float | None = None,
                          limiar_silencio_db: float = -40, silencio_min_s: float = 0.5) -> dict:
     """Mede o áudio de uma faixa (padrão: arquivo inteiro): volume médio/máximo (dB), loudness
     integrada (LUFS), faixa dinâmica, pico real e lista de silêncios."""
@@ -265,7 +265,7 @@ async def diagnostico() -> dict:
 
 # ---------------------------------------------------------------- edição
 @ferramenta
-async def cortar(inicio: str = "in", fim: str = "out", preciso: bool = True) -> dict:
+async def cortar(inicio: str | float = "in", fim: str | float = "out", preciso: bool = True) -> dict:
     """Mantém SÓ o trecho [inicio, fim] (padrão: da primeira à última marca; ex.: inicio='m2', fim='m3').
     preciso=True re-encoda (corte exato ao milissegundo/quadro); False é instantâneo e sem perda,
     mas o corte cai no keyframe mais próximo (pode incluir alguns quadros a mais)."""
@@ -278,7 +278,7 @@ async def cortar(inicio: str = "in", fim: str = "out", preciso: bool = True) -> 
 
 
 @ferramenta
-async def remover_trechos(trechos: list[list[str]], preciso: bool = True) -> dict:
+async def remover_trechos(trechos: list[list[str | float]], preciso: bool = True) -> dict:
     """Remove um ou mais trechos e junta o resto. trechos: [[inicio, fim], ...],
     ex. [["m1","m2"],["m3","m4"]] ou [["0:10","0:12.5"],["1:00","1:03"]]."""
     doc, est = _doc()
@@ -292,7 +292,7 @@ async def remover_trechos(trechos: list[list[str]], preciso: bool = True) -> dic
 
 
 @ferramenta
-async def montar_trechos(trechos: list[list[str]], preciso: bool = True) -> dict:
+async def montar_trechos(trechos: list[list[str | float]], preciso: bool = True) -> dict:
     """Monta um novo vídeo com os trechos na ordem dada (pode reordenar/repetir).
     trechos: [[inicio, fim], ...]."""
     doc, est = _doc()
@@ -306,7 +306,7 @@ async def montar_trechos(trechos: list[list[str]], preciso: bool = True) -> dict
 async def ajustar_audio(faixas: list[int] | None = None, ganho_db: float | None = None,
                         normalizar: bool = False, reduzir_ruido: bool = False, silenciar: bool = False,
                         fade_in_s: float | None = None, fade_out_s: float | None = None,
-                        inicio: str | None = None, fim: str | None = None) -> dict:
+                        inicio: str | float | None = None, fim: str | float | None = None) -> dict:
     """Altera o áudio no ARQUIVO (cria nova versão). faixas: [1], [2], [1,2]... (padrão: todas).
     ganho_db (+/-), silenciar e fades podem ser limitados a [inicio, fim];
     normalizar (EBU R128, -16 LUFS) e reduzir_ruido valem para a faixa inteira.
@@ -341,7 +341,7 @@ async def ajustar_audio(faixas: list[int] | None = None, ganho_db: float | None 
 @ferramenta
 async def faixa_audio(acao: str, faixa: int | None = None, arquivo: str | None = None,
                       idioma: str | None = None, titulo: str | None = None, atraso_s: float = 0.0,
-                      formato: str = "wav", inicio: str | None = None, fim: str | None = None) -> dict:
+                      formato: str = "wav", inicio: str | float | None = None, fim: str | float | None = None) -> dict:
     """Gerencia faixas de áudio.
     acao='remover' (faixa) — tira a faixa do vídeo (nova versão).
     acao='adicionar' (arquivo, idioma, titulo, atraso_s) — adiciona áudio externo como nova faixa (nova versão).
@@ -430,8 +430,8 @@ async def mudar_proporcao(proporcao: str, modo: str = "desfocado", cor: str = "b
 @ferramenta
 async def ajustar_cor(brilho: float | None = None, contraste: float | None = None,
                       saturacao: float | None = None, gama: float | None = None,
-                      temperatura: float | None = None, inicio: str | None = None,
-                      fim: str | None = None) -> dict:
+                      temperatura: float | None = None, inicio: str | float | None = None,
+                      fim: str | float | None = None) -> dict:
     """Ajusta a cor da imagem (nova versão), no vídeo todo ou só em [inicio, fim].
     brilho: -1 a 1 (0 = igual; 0.05–0.15 já se nota); contraste: multiplicador (1 = igual, 1.2 = +20%,
     0.8 = menos); saturacao: multiplicador (1 = igual, 0 = preto e branco, 1.3 = cores mais vivas);
@@ -463,7 +463,7 @@ async def estabilizar(suavizacao: int = 15, bordas: str = "zoom", tremor: int = 
 
 
 @ferramenta
-async def velocidade_trecho(fator: float, inicio: str | None = None, fim: str | None = None,
+async def velocidade_trecho(fator: float, inicio: str | float | None = None, fim: str | float | None = None,
                             manter_tom: bool = True, silenciar: bool = False) -> dict:
     """Câmera lenta ou acelerado num trecho (nova versão; padrão: o vídeo todo). O resto não muda.
     fator: 0.5 = metade da velocidade (câmera lenta), 0.25 = 4× mais lento, 2 = dobro, 4 = 4× (0.1 a 10).
@@ -480,7 +480,7 @@ async def velocidade_trecho(fator: float, inicio: str | None = None, fim: str | 
 
 
 @ferramenta
-async def congelar_quadro(tempo: str = "atual", duracao_s: float = 2.0, modo: str = "inserir") -> dict:
+async def congelar_quadro(tempo: str | float = "atual", duracao_s: float = 2.0, modo: str = "inserir") -> dict:
     """Congela a imagem num quadro por `duracao_s` segundos (nova versão).
     tempo: o quadro a congelar (padrão: posição atual; aceita 'm1', '0:12.5'...).
     modo='inserir' (padrão): o vídeo para nesse quadro e depois continua de onde parou (fica mais longo);
@@ -501,7 +501,7 @@ async def congelar_quadro(tempo: str = "atual", duracao_s: float = 2.0, modo: st
 async def sobrepor_texto(texto: str, posicao: str | list[float] = "base", tamanho: float | None = None,
                          cor: str = "white", caixa: bool = False, cor_caixa: str = "black@0.55",
                          contorno: int | None = None, cor_contorno: str = "black", fonte: str | None = None,
-                         inicio: str | None = None, fim: str | None = None) -> dict:
+                         inicio: str | float | None = None, fim: str | float | None = None) -> dict:
     """Escreve um texto por cima do vídeo (nova versão), no vídeo todo ou só em [inicio, fim].
     Qualquer caractere pode ser usado (aspas, dois-pontos, %, barras...); quebre linhas com \\n (ou uma quebra de linha real).
     posicao: 'base' (padrão), 'topo', 'centro', 'esquerda', 'direita', 'sup_esq', 'sup_dir', 'inf_esq',
@@ -523,8 +523,8 @@ async def sobrepor_texto(texto: str, posicao: str | list[float] = "base", tamanh
 
 @ferramenta
 async def marca_dagua(imagem: str, posicao: str | list[float] = "inf_dir", escala: float = 0.15,
-                      opacidade: float = 1.0, margem: float = 0.03, inicio: str | None = None,
-                      fim: str | None = None) -> dict:
+                      opacidade: float = 1.0, margem: float = 0.03, inicio: str | float | None = None,
+                      fim: str | float | None = None) -> dict:
     """Coloca uma imagem (logo PNG com transparência, JPG...) por cima do vídeo (nova versão).
     posicao: 'inf_dir' (padrão), 'inf_esq', 'sup_dir', 'sup_esq', 'centro', 'topo', 'base'... ou [x, y].
     escala: largura do logo como fração da largura do vídeo (0.15 = 15%) ou em pixels (ex. 200).
@@ -541,8 +541,8 @@ async def marca_dagua(imagem: str, posicao: str | list[float] = "inf_dir", escal
 @ferramenta
 async def borrar_area(retangulos: list[float] | list[list[float]] | None = None,
                       trajetoria: list[dict] | None = None, modo: str = "borrar",
-                      intensidade: float | None = None, inicio: str | None = None,
-                      fim: str | None = None) -> dict:
+                      intensidade: float | None = None, inicio: str | float | None = None,
+                      fim: str | float | None = None) -> dict:
     """Borra ou pixela uma área (placa de carro, rosto, tela) em [inicio, fim] (nova versão; padrão: o vídeo todo).
     Antes, use `ver_quadros` para achar a área. Coordenadas = vídeo como aparece, em pixels ou frações 0–1.
     retangulos: [x, y, largura, altura] (área parada) ou vários: [[x,y,l,a], [x,y,l,a]].
@@ -653,7 +653,7 @@ async def musica_fundo(arquivo: str, modo: str = "mixar", faixa: int = 1, volume
 
 # ---------------------------------------------------------------- montagem e análise (Fase 5)
 @ferramenta
-async def juntar_arquivos(arquivos: list[str], posicao: str = "fim", transicao: str | None = None,
+async def juntar_arquivos(arquivos: list[str], posicao: str | float = "fim", transicao: str | None = None,
                           duracao_transicao: float = 1.0, so_audio: str = "erro", capitulos: bool = False) -> dict:
     """Emenda outros arquivos (vídeos ou áudios do usuário) ao vídeo aberto, numa nova versão.
     Tudo é normalizado para o formato do vídeo aberto: resolução (o que tiver outra proporção ganha barras pretas,
@@ -678,7 +678,7 @@ async def juntar_arquivos(arquivos: list[str], posicao: str = "fim", transicao: 
 
 
 @ferramenta
-async def dividir(modo: str = "marcas", intervalo_s: float | None = None, tempos: list[str] | None = None,
+async def dividir(modo: str = "marcas", intervalo_s: float | None = None, tempos: list[str | float] | None = None,
                   partes: int | None = None, destino: str | None = None, rapido: bool = False) -> dict:
     """Divide o vídeo aberto em ARQUIVOS NOVOS (como exportar: não cria versão, não altera nada, nunca
     sobrescreve): nome.parte01.mp4, nome.parte02.mp4... ao lado do original (ou na pasta `destino`).
@@ -701,8 +701,8 @@ async def dividir(modo: str = "marcas", intervalo_s: float | None = None, tempos
 
 
 @ferramenta
-async def detectar_cenas(limiar: float = 0.3, min_intervalo_s: float = 1.0, inicio: str | None = None,
-                         fim: str | None = None, marcar: bool = False) -> dict:
+async def detectar_cenas(limiar: float = 0.3, min_intervalo_s: float = 1.0, inicio: str | float | None = None,
+                         fim: str | float | None = None, marcar: bool = False) -> dict:
     """Detecta cortes de cena (mudanças bruscas de imagem) no vídeo aberto: sugestões de pontos de corte.
     Devolve os tempos com um score (0..1; maior = mudança mais forte). Analisa uma cópia reduzida (rápido:
     ~10× o tempo real em 720p).
@@ -722,7 +722,7 @@ async def detectar_cenas(limiar: float = 0.3, min_intervalo_s: float = 1.0, inic
 
 
 @ferramenta
-async def capitulos(acao: str = "listar", tempo: str | None = None, titulo: str | None = None,
+async def capitulos(acao: str = "listar", tempo: str | float | None = None, titulo: str | None = None,
                     numero: int | None = None, itens: list | None = None) -> dict:
     """Capítulos do vídeo aberto (aparecem na régua da janela como marcadores discretos, com o título no tooltip).
     acao: 'listar' (padrão; não altera nada) | 'adicionar' (tempo + titulo, ou itens=[[tempo, titulo], ...]) |
@@ -931,8 +931,8 @@ def _avisos_fala(r: dict) -> dict:
 
 
 @ferramenta
-async def transcrever(idioma: str = "auto", modelo: str = "base", faixa: int = 1, inicio: str | None = None,
-                      fim: str | None = None, palavras: bool = False, arquivo: str | None = None) -> dict:
+async def transcrever(idioma: str = "auto", modelo: str = "base", faixa: int = 1, inicio: str | float | None = None,
+                      fim: str | float | None = None, palavras: bool = False, arquivo: str | None = None) -> dict:
     """Transcreve a FALA do vídeo aberto (versão atual) ou de `arquivo`, 100% local (whisper.cpp na CPU;
     nada vai para a internet). Devolve o texto e os segmentos com tempo (segundos do arquivo inteiro).
     idioma: 'auto' (detecta) ou 'pt', 'en', 'es'...; informar acelera e evita erro de detecção.
@@ -998,7 +998,7 @@ async def gravar_legenda(legenda: str | None = None, idioma: str = "auto", model
     """QUEIMA a legenda na imagem do vídeo aberto (sempre visível, em qualquer player; nova versão; o áudio
     é copiado). Sem `legenda`, transcreve a fala da versão atual e usa o resultado; com `legenda`, usa esse
     arquivo .srt/.vtt/.ass (ex.: o gerado por `gerar_legenda` e corrigido).
-    Estilo (padrão: branco com contorno preto, embaixo, letra = 5,5% da altura, DejaVu Sans):
+    Estilo (padrão: branco com contorno preto, embaixo, letra = 5,5% do menor lado, DejaVu Sans):
       tamanho: px (ex. 40) ou fração da altura (0.07); cor / cor_contorno / cor_caixa: nome em português ou
       inglês ('amarelo', 'white'...) ou '#RRGGBB', com '@opacidade' ('black@0.5'); contorno: px;
       posicao: 'base' | 'topo' | 'centro'; margem: distância da borda (px ou fração);
@@ -1116,8 +1116,8 @@ def _objeto_versao(doc: Documento):
 
 @ferramenta
 async def segmentar_objeto(pontos: list[list[float]] | None = None, caixa: list[float] | None = None,
-                           pontos_negativos: list[list[float]] | None = None, tempo: str = "atual",
-                           inicio: str | None = None, fim: str | None = None, modelo: str = "sam2.1-tiny",
+                           pontos_negativos: list[list[float]] | None = None, tempo: str | float = "atual",
+                           inicio: str | float | None = None, fim: str | float | None = None, modelo: str = "sam2.1-tiny",
                            passo_quadros: int = 1) -> list | dict:
     """IA local (SAM 2.1): encontra um objeto num quadro e o RASTREIA pelo trecho, gerando uma máscara (id 'obj1',
     'obj2'...) usada por `remover_objeto`, `fundo_objeto`, `recortar_objeto` e `destacar_objeto`.
@@ -1142,7 +1142,7 @@ async def segmentar_objeto(pontos: list[list[float]] | None = None, caixa: list[
 
 
 @ferramenta
-async def ajustar_mascara(tempo: str = "atual", pontos: list[list[float]] | None = None,
+async def ajustar_mascara(tempo: str | float = "atual", pontos: list[list[float]] | None = None,
                           pontos_negativos: list[list[float]] | None = None, caixa: list[float] | None = None,
                           mascara: str | None = None) -> list | dict:
     """Corrige uma máscara: refaz a segmentação com os prompts originais MAIS os novos no quadro em `tempo`

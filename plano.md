@@ -428,7 +428,7 @@ conferência) → confirma/`ajustar_mascara` → `remover_objeto` / `fundo_objet
     e deixava "fantasmas" de coisas que passaram pelo fundo. Teste: círculo removido sem resto visível, 4,6 s para 3 s de
     vídeo, 280 MB.
   - `lama` (câmera em movimento): LaMa (`opencv/inpainting_lama`, 512x512 fixo) por quadro num recorte quadrado em volta
-    do buraco (contexto ~0,8× o tamanho de cada lado), composição com borda suave. LAMA_RESULTADO
+    do buraco (contexto ~0,8× o tamanho de cada lado), composição com borda suave. Teste: 30 quadros em 148 s (~4,9 s/quadro), pico 870 MB; resultado aceitável, leve mancha em área lisa grande.
   - `rapido`: sem modelo (convolução normalizada em várias escalas); objetos pequenos/fundo liso. 8,6 s para 3 s, 300 MB.
   - `auto`: mede o movimento da câmera (mediana da diferença para o 1º quadro nas áreas visíveis, em 1/8 da resolução):
     ≤ 6 → `fundo`; senão `lama` se couber em ~10 min, senão `rapido` com aviso.
@@ -439,7 +439,7 @@ conferência) → confirma/`ajustar_mascara` → `remover_objeto` / `fundo_objet
   a barra de status da janela mostra "Claude: segmentando objeto… N%". As ferramentas esperam 50 s antes de devolver o id.
 - Limitações: SAM roda ~2–4 s/quadro (3 s de vídeo ≈ 3–6 min); rastreamento sem memória pode trocar de objeto se outro
   parecido encostar, ou perder o objeto em oclusão total (o quadro fica vazio e o próximo tenta de novo com a última
-  caixa; corrigir com `ajustar_mascara`); LaMa ~7 s/quadro e pode tremular entre quadros; `fundo` assume câmera parada
+  caixa; corrigir com `ajustar_mascara`); LaMa ~4,5–7 s/quadro e pode tremular entre quadros; `fundo` assume câmera parada
   e iluminação constante; o vídeo passa por rgb24 (10 bits vira 8; SAR/rotação já aplicados como na Fase 3) e é
   re-encodado inteiro (x264 CRF 18; PSNR fora do trecho 43,7 dB); VFR vira CFR; tarefas vivem no processo do MCP
   (reiniciar o MCP perde as tarefas, não as máscaras); edições feitas por outras ferramentas enquanto uma tarefa roda
