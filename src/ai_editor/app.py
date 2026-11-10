@@ -869,7 +869,12 @@ class Janela(QMainWindow):
             self.abrir(f)
 
     def alternar(self):
-        self._set("pause", not self._get("pause", True))
+        pausado = self._get("pause", True)
+        # no fim o mpv para no início do último quadro (não na duração): tolerância de 1,5 quadro
+        margem = max(0.05, 1.5 / self.fps) if self.fps else 0.25
+        if pausado and self.arquivo and (self._get("eof-reached", False) or self.pos >= self.visao.dur - margem):
+            self.pular(0)  # acabou: play recomeça do início
+        self._set("pause", not pausado)
 
     def pular(self, t: float, exato: bool = True):
         if not self.arquivo:
