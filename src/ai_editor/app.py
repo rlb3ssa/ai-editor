@@ -30,7 +30,7 @@ from . import cliente
 from .core import CACHE_DIR, DEV, FONTE_DIR, NOME, RUNTIME_DIR, SOCKET_PATH, TITULO, Documento, fmt_tempo, parse_tempo
 from .ondas import PICOS_POR_SEG, picos
 
-CAB = 180  # largura do cabeçalho à esquerda das faixas
+CAB = 216  # largura do cabeçalho à esquerda das faixas
 COR_FUNDO = QColor("#15171c")
 COR_TRILHA = QColor("#1f232b")
 COR_ONDA = QColor("#4fa3ff")
@@ -637,25 +637,32 @@ class Janela(QMainWindow):
         lr = QHBoxLayout()
         lr.setContentsMargins(0, 0, 0, 0)
         lr.setSpacing(0)
-        # canto à esquerda da régua: tempo atual (grande) e duração total (menor)
+        # canto à esquerda da régua: tempo atual centralizado + "• N fps"; atual / total na dica
         canto = QWidget()
         canto.setObjectName("canto")
         canto.setFixedWidth(CAB)
         canto.setAttribute(Qt.WA_StyledBackground)
-        lc = QVBoxLayout(canto)
-        lc.setContentsMargins(10, 3, 6, 3)
-        lc.setSpacing(0)
+        lc = QHBoxLayout(canto)
+        lc.setContentsMargins(4, 0, 4, 0)
+        lc.setSpacing(6)
         mono = QFont("JetBrains Mono, DejaVu Sans Mono, monospace")
         mono.setStyleHint(QFont.Monospace)
         self.l_tempo = QLabel("--:--:--.---")
         self.l_tempo.setObjectName("tempo")
         f = QFont(mono)
-        f.setPointSize(13)
+        f.setPointSize(12)
         f.setWeight(QFont.DemiBold)
         self.l_tempo.setFont(f)
         self.l_tempo.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        # só o tempo atual; atual / total aparece ao passar o mouse
+        self.l_fps = QLabel("")
+        self.l_fps.setObjectName("fps")
+        f = QFont(mono)
+        f.setPointSize(9)
+        self.l_fps.setFont(f)
+        lc.addStretch(1)
         lc.addWidget(self.l_tempo, 0, Qt.AlignVCenter)
+        lc.addWidget(self.l_fps, 0, Qt.AlignVCenter)
+        lc.addStretch(1)
         self.canto = canto
         lr.addWidget(canto)
         self.regua = Regua(self)
@@ -985,6 +992,10 @@ class Janela(QMainWindow):
             self.canto.setToolTip(dica)
         fps = self.fps
         self.tela.mostrar_quadro(int(round(self.pos * fps)) if fps else None, fps)
+        txt_fps = f"• {fps:.2f}".rstrip("0").rstrip(".") + " fps" if fps else ""
+        if self.l_fps.text() != txt_fps:
+            self.l_fps.setText(txt_fps)
+            self.l_fps.setVisible(bool(txt_fps))
         self._repintar()
 
     def _repintar(self):
@@ -1230,6 +1241,7 @@ QToolButton#salvar:hover { background: #3a80d6; }
 QToolButton#salvar:disabled { background: #262b34; color: #4a4f5a; }
 QWidget#canto { background: #0d1117; border-right: 1px solid #21262d; }
 QLabel#tempo { color: #e6edf3; }
+QLabel#fps { color: #8b949e; }
 QLabel#sutil { color: #6e7681; }
 QLabel#quadro { color: #e6edf3; background: rgba(13, 17, 23, 170); border-radius: 4px; padding: 3px 7px; }
 QLabel#versao { color: #8b949e; padding-right: 6px; }
