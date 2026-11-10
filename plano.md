@@ -15,7 +15,7 @@ Princípios:
 - **Distribuível**: um único AppImage, sem exigir Python, ffmpeg ou bibliotecas instaladas.
 - **Open source**: GPL-3.0.
 
-## 2. Estado atual (v0 — importado de `~/claude-player`)
+## 2. Estado atual (v0 — importado de `~/claude-player`, renomeado para `ai_editor`)
 
 ### 2.1 Arquitetura
 
@@ -52,13 +52,13 @@ Claude (Code/Desktop) ──stdio/MCP──> claude-player-mcp ──socket Unix
 ### 2.5 Limitações conhecidas
 - Vídeo embutido por `wid` (janela X11): **não funciona em Wayland**.
 - Depende de Python, libmpv, ffmpeg, mediainfo e exiftool instalados no sistema.
-- Caminhos e nomes ainda usam "claude-player" (renomear para o nome do projeto).
 - Zoom/arraste do vídeo ainda não validado com mouse real.
 
 ## 3. Roadmap
 
 ### Fase 1 — Base portátil (Linux)
-- [ ] Renomear pacote/comandos para `ai-editor` (manter compatibilidade com o socket/MCP atual).
+- [x] Renomear pacote/comandos para `ai-editor` / `ai-editor-mcp`.
+- [x] Modo dev: instância separada (`ai-editor-dev`) com recarga automática ao salvar código.
 - [ ] Trocar o embutimento por `wid` pela **render API do libmpv** num `QOpenGLWidget` (X11 + Wayland, mouse nativo do Qt).
 - [ ] Localizar binários primeiro dentro do pacote e depois no sistema (`ffmpeg`, `ffprobe`, `mediainfo`, `exiftool`, `libmpv`).
 - [ ] Comando `ai-editor --instalar`: registra o MCP no Claude Code e no Claude Desktop, cria o `.desktop` e associa tipos MIME (opcional).
@@ -91,7 +91,20 @@ Fluxo: o Claude localiza o objeto nos quadros → segmenta e rastreia → mostra
 - [ ] Exportar com predefinições (WhatsApp, YouTube, GIF).
 - [ ] Outras plataformas (Windows/macOS) — depende da render API da Fase 1.
 
-## 4. Licença e dependências
+## 4. Fluxo de desenvolvimento
+
+- **Modo dev** = rodando do código-fonte (`uv run ai-editor`). Detectado automaticamente (não empacotado);
+  forçar com `AI_EDITOR_DEV=0/1`. Usa nome/socket próprios (`ai-editor-dev`, `$XDG_RUNTIME_DIR/ai-editor-dev/`),
+  então convive com a versão instalada (`ai-editor`).
+- **Recarga automática**: ao salvar um `.py` da janela, ela se reinicia mantendo arquivo, posição, pausa,
+  marcas IN/OUT, zoom do vídeo e geometria. Se o arquivo tiver erro de sintaxe, a recarga é cancelada e o
+  erro aparece na barra de status. Mudanças só em `mcp_server.py` exigem `/mcp` → reconectar.
+- **MCP dev**: registrado como `ai-editor-dev` (`claude mcp add --scope user ai-editor-dev -- <repo>/.venv/bin/ai-editor-mcp`).
+- **Player padrão** durante o desenvolvimento: `~/.local/share/applications/ai-editor-dev.desktop`.
+- **AppImage** só para testar o empacotamento e nas releases (`make appimage`); é um arquivo único, atualizar = trocar o arquivo.
+- **Git**: trabalho na `dev`; conjunto estável → merge na `main` + tag → GitHub Actions publica o AppImage.
+
+## 5. Licença e dependências
 
 Projeto: **GPL-3.0**.
 
@@ -107,12 +120,12 @@ Projeto: **GPL-3.0**.
 | LaMa | Apache-2.0 | ok com GPL-3.0 |
 | ProPainter | NTU S-Lab 1.0 (não comercial) | **evitar no pacote**; no máximo opcional |
 
-## 5. Decisões
+## 6. Decisões
 - 2026-11-09: foco inicial só em Linux; distribuição por AppImage.
 - 2026-11-09: licença GPL-3.0.
+- 2026-11-09: nome do pacote/comando `ai-editor`; app "AI Editor".
 - 2026-11-09: IAs rodam localmente em CPU (sem LLM extra); o Claude faz o papel de "cérebro" via MCP.
 
-## 6. Questões em aberto
-- Nome final do comando/pacote (`ai-editor`?) e do app na interface.
+## 7. Questões em aberto
 - Manter o idioma da interface em português ou adicionar i18n desde já?
 - Associar o app como player padrão de mídia na instalação ou deixar opcional?

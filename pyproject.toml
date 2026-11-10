@@ -1,5 +1,5 @@
 [project]
-name = "claude-player"
+name = "ai-editor"
 version = "0.1.0"
 description = "Player de vídeo leve controlado pelo Claude via MCP"
 authors = [
@@ -15,8 +15,8 @@ dependencies = [
 ]
 
 [project.scripts]
-claude-player = "claude_player.app:main"
-claude-player-mcp = "claude_player.mcp_server:main"
+ai-editor = "ai_editor.app:main"
+ai-editor-mcp = "ai_editor.mcp_server:main"
 
 [build-system]
 requires = ["uv_build>=0.12.24,<0.13.0"]

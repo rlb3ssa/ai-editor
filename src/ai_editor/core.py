@@ -1,4 +1,4 @@
-"""Núcleo do claude-player: caminhos, tempo, versões, ffmpeg e metadados.
+"""Núcleo do AI Editor: caminhos, tempo, versões, ffmpeg e metadados.
 
 Usado tanto pela janela (app.py) quanto pelo servidor MCP (mcp_server.py).
 """
@@ -16,9 +16,17 @@ import tempfile
 from pathlib import Path
 
 # ---------------------------------------------------------------- caminhos
-RUNTIME_DIR = Path(os.environ.get("XDG_RUNTIME_DIR", tempfile.gettempdir())) / "claude-player"
+# Modo desenvolvimento: rodando do código-fonte (não empacotado). Pode ser forçado com AI_EDITOR_DEV=0/1.
+# A instância dev usa outro nome/socket, para conviver com a versão instalada.
+_dev_env = os.environ.get("AI_EDITOR_DEV")
+DEV = (_dev_env == "1") if _dev_env in ("0", "1") else not getattr(__import__("sys"), "frozen", False)
+NOME = "ai-editor-dev" if DEV else "ai-editor"
+TITULO = "AI Editor (dev)" if DEV else "AI Editor"
+FONTE_DIR = Path(__file__).resolve().parent
+
+RUNTIME_DIR = Path(os.environ.get("XDG_RUNTIME_DIR", tempfile.gettempdir())) / NOME
 SOCKET_PATH = RUNTIME_DIR / "controle.sock"
-CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "claude-player"
+CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "ai-editor"
 LOCAL_BIN = Path.home() / ".local" / "bin"
 
 

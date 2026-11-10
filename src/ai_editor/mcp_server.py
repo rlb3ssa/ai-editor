@@ -1,4 +1,4 @@
-"""Servidor MCP do claude-player: o Claude controla a janela e edita com ffmpeg."""
+"""Servidor MCP do AI Editor: o Claude controla a janela e edita com ffmpeg."""
 from __future__ import annotations
 
 import asyncio
@@ -15,13 +15,13 @@ from mcp.server.mcpserver import Image, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
 from . import cliente, core
-from .core import Documento, fmt_tempo, parse_tempo
+from .core import NOME, Documento, fmt_tempo, parse_tempo
 
 mcp = MCPServer(
-    "claude-player",
+    NOME,
     log_level="WARNING",
     instructions=(
-        "Controla a janela de vídeo do usuário (Claude Player) e edita com ffmpeg.\n"
+        "Controla a janela de vídeo do usuário (AI Editor) e edita com ffmpeg.\n"
         "- Tempos aceitam segundos (83.456), '1:23.456', '1500ms' ou palavras: 'atual'/'aqui', "
         "'in', 'out', 'inicio', 'fim' e expressões como 'atual-2' ou 'out+0.5'.\n"
         "- Faixas de áudio são numeradas a partir de 1 (A1, A2...), como na janela.\n"
@@ -31,7 +31,7 @@ mcp = MCPServer(
     ),
 )
 
-APP_CMD = [sys.executable, "-m", "claude_player.app"]
+APP_CMD = [sys.executable, "-m", "ai_editor.app"]
 
 
 def ferramenta(fn):

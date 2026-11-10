@@ -1,4 +1,4 @@
-"""Janela do claude-player: vídeo (libmpv) + régua em ms + uma onda por faixa de áudio."""
+"""Janela do AI Editor: vídeo (libmpv) + régua em ms + uma onda por faixa de áudio."""
 from __future__ import annotations
 
 import json
@@ -11,7 +11,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "xcb")  # embutir o mpv via X11/XWaylan
 os.environ.setdefault("QT_API", "pyside6")
 
 import numpy as np
-from PySide6.QtCore import (QObject, QPointF, QRectF, QRunnable, QSize, Qt, QThreadPool, QTimer,
+from PySide6.QtCore import (QFileSystemWatcher, QObject, QPointF, QRectF, QRunnable, QSize, Qt, QThreadPool, QTimer,
                             Signal)
 from PySide6.QtGui import (QAction, QColor, QFont, QKeySequence, QPainter, QPalette, QPen,
                            QPolygonF, QShortcut)
@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QFileDialog, QFrame, QHB
 import qtawesome as qta
 
 from . import cliente
-from .core import CACHE_DIR, RUNTIME_DIR, SOCKET_PATH, Documento, fmt_tempo, parse_tempo
+from .core import CACHE_DIR, DEV, FONTE_DIR, NOME, RUNTIME_DIR, SOCKET_PATH, TITULO, Documento, fmt_tempo, parse_tempo
 from .ondas import PICOS_POR_SEG, picos
 
 CAB = 180  # largura do cabeçalho à esquerda das faixas
@@ -44,7 +44,7 @@ DESTAQUE = "#4fa3ff"
 
 # Estilo de ícones: "ph" (Phosphor) ou "mdi6" (Material Design). Os nomes no código são os do MDI;
 # para Phosphor eles são traduzidos pela tabela abaixo.
-ESTILO_ICONES = os.environ.get("CLAUDE_PLAYER_ICONES", "ph")
+ESTILO_ICONES = os.environ.get("AI_EDITOR_ICONES", "ph")
 _PHOSPHOR = {
     "folder-open-outline": "folder-open",
     "skip-previous": "skip-back-fill",
@@ -448,7 +448,7 @@ class TelaVideo(QWidget):
 class Janela(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Claude Player")
+        self.setWindowTitle(TITULO)
         tela = QApplication.primaryScreen().availableGeometry()
         self.resize(min(1100, int(tela.width() * 0.9)), min(760, int(tela.height() * 0.9)))
         self.setMinimumWidth(640)
@@ -642,6 +642,8 @@ class Janela(QMainWindow):
         self.servidor.listen(str(SOCKET_PATH))
         self.servidor.newConnection.connect(self._nova_conexao)
         self._atualizar_versao()
+        if DEV:
+            self._iniciar_recarga_auto()
 
     # ------------------------------------------------------------ mpv helpers
     def _get(self, prop, padrao=None):
@@ -671,7 +673,7 @@ class Janela(QMainWindow):
         self.marca_in = self.marca_out = None
         self._carregar(self.doc.atual(), pos=0.0)
         self._set("pause", False)
-        self.setWindowTitle(f"{self.doc.original.name} — Claude Player")
+        self.setWindowTitle(f"{self.doc.original.name} — {TITULO}")
 
     def _carregar(self, arquivo: Path, pos: float = 0.0):
         self.arquivo = arquivo
@@ -786,7 +788,7 @@ class Janela(QMainWindow):
         novo = self.doc.salvar()
         self.doc = Documento(novo)
         self._carregar(novo, pos=pos)
-        self.setWindowTitle(f"{novo.name} — Claude Player")
+        self.setWindowTitle(f"{novo.name} — {TITULO}")
         self.statusBar().showMessage(f"Salvo em {novo}", 10000)
         return novo
 
@@ -1015,7 +1017,7 @@ class Janela(QMainWindow):
         elif cmd == "recarregar":
             if a.get("arquivo"):
                 self.doc = Documento(a["arquivo"])
-                self.setWindowTitle(f"{self.doc.original.name} — Claude Player")
+                self.setWindowTitle(f"{self.doc.original.name} — {TITULO}")
             self.recarregar(a.get("mensagem"))
         elif cmd == "mensagem":
             self.statusBar().showMessage(a.get("texto", ""), 15000)
@@ -1032,6 +1034,81 @@ class Janela(QMainWindow):
     def dragEnterEvent(self, e):
         if e.mimeData().hasUrls():
             e.acceptProposedAction()
+
+    # ------------------------------------------------------------ modo dev: recarga automática
+    def _iniciar_recarga_auto(self):
+        """Ao salvar um .py da janela, reinicia o processo no mesmo arquivo/posição/zoom."""
+        self._vigia = QFileSystemWatcher([str(FONTE_DIR)], self)
+        self._mtimes = self._ler_mtimes()
+        self._t_recarga = QTimer(self, singleShot=True, interval=400, timeout=self._talvez_recarregar)
+        self._vigia.directoryChanged.connect(lambda _: self._t_recarga.start())
+        self._vigia.fileChanged.connect(lambda _: self._t_recarga.start())
+        self._vigia.addPaths([str(f) for f in FONTE_DIR.glob("*.py")])
+
+    @staticmethod
+    def _ler_mtimes():
+        return {f.name: f.stat().st_mtime_ns for f in FONTE_DIR.glob("*.py")}
+
+    def _talvez_recarregar(self):
+        novos = self._ler_mtimes()
+        mudou = {n for n in novos if novos[n] != self._mtimes.get(n)}
+        self._mtimes = novos
+        # editores que salvam por substituição tiram o arquivo da vigia: recoloca
+        faltando = [str(f) for f in FONTE_DIR.glob("*.py") if str(f) not in self._vigia.files()]
+        if faltando:
+            self._vigia.addPaths(faltando)
+        mudou -= {"mcp_server.py"}  # mudança só no MCP não afeta a janela
+        if not mudou:
+            return
+        import py_compile
+        for nome in sorted(mudou):
+            try:
+                py_compile.compile(str(FONTE_DIR / nome), doraise=True)
+            except py_compile.PyCompileError as e:
+                self.statusBar().showMessage(f"recarga cancelada: erro em {nome}: {e.msg.strip().splitlines()[-1]}", 15000)
+                print(e.msg, file=sys.stderr, flush=True)
+                return
+        print(f"[dev] recarregando por mudança em: {', '.join(sorted(mudou))}", file=sys.stderr, flush=True)
+        self.reiniciar_processo()
+
+    def _estado_retomada(self) -> dict:
+        g = self.geometry()
+        return {
+            "arquivo": str(self.doc.original) if self.doc else None,
+            "pos": self.pos, "pausado": bool(self._get("pause", True)),
+            "in": self.marca_in, "out": self.marca_out,
+            "zoom": self.tela.zoom, "pan": self.tela.pan,
+            "geo": [g.x(), g.y(), g.width(), g.height()],
+            "max": self.isMaximized(),
+        }
+
+    def reiniciar_processo(self):
+        estado = self._estado_retomada()
+        try:
+            self.mpv.terminate()
+        except Exception:  # noqa: BLE001
+            pass
+        self.servidor.close()
+        QLocalServer.removeServer(str(SOCKET_PATH))
+        os.environ["AI_EDITOR_RETOMAR"] = json.dumps(estado)
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os.execv(sys.executable, [sys.executable, "-m", "ai_editor.app"])
+
+    def retomar(self, e: dict):
+        if e.get("max"):
+            self.showMaximized()
+        elif e.get("geo"):
+            self.setGeometry(*e["geo"])
+        if not e.get("arquivo") or not Path(e["arquivo"]).exists():
+            return
+        self.doc = Documento(Path(e["arquivo"]))
+        self._carregar(self.doc.atual(), pos=float(e.get("pos") or 0))
+        self._set("pause", bool(e.get("pausado", True)))
+        self.setWindowTitle(f"{self.doc.original.name} — {TITULO}")
+        self.marca_in, self.marca_out = e.get("in"), e.get("out")
+        self.tela.definir(e.get("zoom", 0), *(e.get("pan") or [0, 0]))
+        self.statusBar().showMessage("[dev] código recarregado", 3000)
 
     def dropEvent(self, e):
         urls = e.mimeData().urls()
@@ -1121,13 +1198,16 @@ def main():
             cliente.enviar("mostrar")
         return
     app = QApplication(sys.argv)
-    app.setApplicationName("Claude Player")
-    app.setDesktopFileName("claude-player")
+    app.setApplicationName(TITULO)
+    app.setDesktopFileName(NOME)
     locale.setlocale(locale.LC_NUMERIC, "C")
     _tema(app)
     j = Janela()
     j.show()
-    if args:
+    retomada = os.environ.pop("AI_EDITOR_RETOMAR", None)
+    if retomada:
+        QTimer.singleShot(0, lambda: j.retomar(json.loads(retomada)))
+    elif args:
         QTimer.singleShot(0, lambda: j.abrir(args[0]))
     sys.exit(app.exec())
 
