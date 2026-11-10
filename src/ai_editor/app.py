@@ -1362,6 +1362,7 @@ class Janela(QMainWindow):
 
     def reiniciar_processo(self):
         estado = self._estado_retomada()
+        self.painel_exportar.encerrar()  # o execv não mata o ffmpeg de uma exportação em andamento
         try:
             self.tela.liberar()
             self.mpv.terminate()
@@ -1395,6 +1396,7 @@ class Janela(QMainWindow):
             self.abrir(urls[0].toLocalFile())
 
     def closeEvent(self, e):
+        self.painel_exportar.encerrar()
         try:
             self.tela.liberar()
             self.mpv.terminate()

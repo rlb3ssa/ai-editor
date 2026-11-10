@@ -47,6 +47,28 @@ sem_audio, faixa, enquadramento, arquivo)`: cria um arquivo novo (não é versã
 A foto de quadro é a predefinição `png`/`jpg` com `tempo` (sem ferramenta separada). A barra de status da janela
 mostra o progresso e o caminho final.
 
+Edições de imagem (Fase 3; cada uma cria uma versão e recarrega a janela; tempos no formato de `parse_tempo`):
+- `transformar_imagem(recorte | proporcao+posicao, girar, modo_giro, cor, espelhar, largura, altura, escala)`:
+  recorte → giro → espelho → tamanho numa versão só.
+- `mudar_proporcao(proporcao, modo=desfocado|barras|recorte, cor, largura, altura, posicao)`.
+- `ajustar_cor(brilho, contraste, saturacao, gama, temperatura, inicio, fim)`.
+- `estabilizar(suavizacao, bordas=zoom|preto|manter, tremor, metodo=vidstab|deshake)`.
+- `velocidade_trecho(fator, inicio, fim, manter_tom, silenciar)` e `congelar_quadro(tempo, duracao_s,
+  modo=inserir|substituir)`: mudam a linha do tempo (limpam as marcas).
+- `sobrepor_texto(texto, posicao, tamanho, cor, caixa, cor_caixa, contorno, cor_contorno, fonte, inicio, fim)` e
+  `marca_dagua(imagem, posicao, escala, opacidade, margem, inicio, fim)`.
+- `borrar_area(retangulos | trajetoria, modo=borrar|pixelar, intensidade, inicio, fim)`.
+
+Edições de áudio (Fase 4; cada uma cria uma versão; faixas numeradas a partir de 1; resposta traz `detalhes`
+com o que foi medido):
+- `reduzir_ruido(metodo=afftdn|anlmdn|rnnoise, intensidade=leve|media|forte|dB, faixa, inicio, fim, piso_ruido_db)`.
+- `remover_silencios(modo=cortar|analisar, limiar_db (padrão automático), duracao_min_s, margem_s, faixa, inicio, fim)`:
+  corta vídeo e todas as faixas juntos; `analisar` só lista (para `marcar` na régua).
+- `fade_audio(entrada_s, saida_s, faixas, video, cor, curva)`: fade no começo/fim; `video=True` escurece a imagem junto.
+- `musica_fundo(arquivo, modo=mixar|trocar|nova_faixa, faixa, volume_db, loop, fade_in_s, fade_out_s, inicio, fim,
+  musica_inicio, ducking, ducking_db, titulo)`.
+- Extrair só o áudio: `exportar` com predefinição `mp3`/`m4a`/`opus`/`ogg`/`wav`/`flac` (ou `faixa_audio(acao='extrair')`).
+
 ### 2.3 Regras de versões
 - Cada edição grava `vNNN.ext` em `.<arquivo>.versoes/` ao lado do original, com `historico.json`.
 - **Salvar**: a última versão vira o original; o original vai para a Lixeira e as versões são apagadas.
@@ -98,22 +120,99 @@ Convenção: **editar** cria versões temporárias do mesmo arquivo (o original 
   tamanho máximo, destino e progresso; roda em `QThreadPool` com cancelar. Comando de socket `exportar`
   (`acao`: abrir | iniciar | cancelar | fechar | estado).
 - Limitações: progresso do GIF fica parado até o fim (o `palettegen` precisa ver o vídeo todo); `alvo_mb` costuma
-  ficar entre 95% e 100% do alvo (x265 com margem maior); áudio de várias faixas: whatsapp/youtube/instagram exportam
+  ficar entre 93% e 100% do alvo (x265/VP9 com margem 0,97; trechos curtos em VP9 ficam mais abaixo); áudio de várias faixas: whatsapp/youtube/instagram exportam
   só a A1 (`faixa=N` escolhe), mp4/webm/menor levam todas; sem mixagem das faixas na exportação.
 
 ### Fase 3 — Imagem
-- [ ] Recortar área (crop), girar, espelhar, mudar resolução.
-- [ ] Mudar proporção (16:9 → 9:16, com fundo desfocado ou recorte).
-- [ ] Brilho, contraste, saturação; estabilizar (`vidstab`/`deshake`).
-- [ ] Câmera lenta / acelerar num trecho; congelar quadro.
-- [ ] Texto e marca d'água por cima; borrar uma área num trecho (placa, rosto).
+Tudo como **versões** (mesmo mecanismo das edições existentes). Vídeo re-encodado com `codec_video` (x264 CRF 18
+`veryfast`, ou VP9 em `.webm`; 10 bits continua 10 bits), dimensões sempre pares, coordenadas no vídeo como é
+exibido (o ffmpeg aplica a rotação de metadado na entrada e a saída fica sem rotação). Edições que não mudam o
+tempo copiam áudio e legendas sem perda (tags mantidas). Código em `core.py`, seção "imagem (Fase 3)".
+- [x] Recortar área (crop), girar, espelhar, mudar resolução → `transformar_imagem`. Recorte em px ou frações 0–1,
+  ou por proporção com posição; giro 90/180/270 por `transpose`, ângulo livre com `rotate` em 3 modos
+  (`expandir`/`manter`/`recorte`, este com zoom mínimo calculado para não sobrar canto).
+- [x] Mudar proporção → `mudar_proporcao` (`desfocado`/`barras`/`recorte`), reaproveita `_cadeia_video` da
+  exportação (ganhou o parâmetro `cor` para as barras). Sem tamanho dado, mantém o lado maior (1280x720 → 720x1280);
+  `recorte` sem tamanho mantém os pixels originais.
+- [x] Brilho, contraste, saturação, gama, temperatura → `ajustar_cor` (`eq` + `colortemperature`, com fallback
+  `colorbalance`), opcionalmente só num trecho (`enable=between(t,a,b)`).
+- [x] Estabilizar → `estabilizar`: vid.stab em 2 passes (`vidstabdetect` → `.trf` temporário → `vidstabtransform`
+  + `unsharp`); sem vid.stab, `deshake`. Teste com vídeo tremido sintético: diferença média entre quadros
+  8,2 → 1,5 (vid.stab) e 6,1 (deshake).
+- [x] Câmera lenta / acelerar num trecho → `velocidade_trecho` (uma entrada `-ss/-t` por segmento + `concat`, como
+  o corte preciso — sem `split`, que acumularia quadros na memória; `setpts` + `atempo` encadeado em estágios
+  0,5–2; `manter_tom=False` usa `asetrate`; `fps` no fim volta a fps constante). Congelar quadro →
+  `congelar_quadro` (`inserir`: pausa com áudio em silêncio via `anullsrc`; `substituir`: quadro parado por cima,
+  áudio copiado). Pega o quadro exibido no tempo pedido, descontando o atraso do vídeo no contêiner (MKV com
+  vídeo em 0,021 s). Conferido pelo contador do testsrc e pela frequência do tom (330 Hz mantido / 165 Hz sem tom).
+- [x] Texto → `sobrepor_texto` (`drawtext`, `expansion=none`, escape em 2 níveis em `core.esc_filtro`: aspas,
+  dois-pontos, vírgula, colchetes, `;`, `\` e `%` testados na imagem; fonte DejaVu Sans via `fc-match`; reduz o
+  tamanho padrão se o texto não couber; `text_align` em várias linhas quando o ffmpeg tem, 6.1+).
+  Marca d'água → `marca_dagua` (PNG com alfa, escala, opacidade via `colorchannelmixer`, intervalo).
+- [x] Borrar/pixelar área → `borrar_area` (`crop` + `gblur`/`pixelize` + `overlay` com `enable`); vários retângulos
+  parados ou uma `trajetoria` com pontos (centro interpolado linearmente por expressão em `t` no `crop` e no
+  `overlay`; tamanho = o maior dos pontos).
+- Limitações: câmera lenta duplica quadros (sem interpolação de movimento, `minterpolate` seria pesado demais);
+  velocidade/congelar descartam legendas embutidas e capítulos (avisam) e re-encodam todo o áudio; a trajetória
+  do borrão é linear por partes e de tamanho fixo (sem rastreamento automático — fica para a Fase 7);
+  marca d'água só imagem estática (GIF/vídeo como marca não); `colortemperature` é lento (~0,5× tempo real em
+  720p); pixels não quadrados (SAR ≠ 1) não são tratados no recorte (a saída sai com `setsar=1`);
+  `vidstab` leva ~2,5× a duração do vídeo. Filtros usados registrados em `binarios.RECURSOS_FFMPEG`
+  (`drawtext`, `vidstabdetect/transform`, `deshake`, `colortemperature`); vid.stab é GPL-2.0+ (ok).
 
 ### Fase 4 — Áudio prático
-- [ ] Redução de ruído: RNNoise (`arnndn`, embutido); DeepFilterNet sob demanda.
-- [ ] Tirar silêncios automaticamente (`silencedetect`).
-- [ ] Fade in/out; trocar ou adicionar música de fundo (com ducking).
-- [ ] Extrair só o áudio (MP3/WAV/Opus).
-- [ ] Separar voz da música (Demucs, sob demanda).
+Só com o ffmpeg (nada baixado). Código em `core.py`, seção "áudio (Fase 4)"; helper `_editar_audio` (vídeo e faixas
+não tocadas copiados sem perda, faixa editada re-encodada com `codec_audio` e tags reaplicadas). Medições por janelas
+de 50 ms do `astats` (`niveis_audio`, p10 = piso, p80 = fala).
+- [x] Redução de ruído → `reduzir_ruido`. `afftdn` (padrão): acha a pausa mais quieta (≥ 0,3 s, ≤ p10+3 dB, quando há
+  ≥ 10 dB de contraste fala/pausa), coloca esse trecho **antes** do áudio (`concat` com uma 2ª entrada `-ss/-t`) para o
+  filtro aprender o perfil (`asendcmd` → `sn start/stop`) e corta de volta (`atrim`); `nf` = ruído medido + 18 dB
+  (calibrado: com o nf default −50 o afftdn quase não reduz, nem com perfil). Sem pausas, estima pelo p10.
+  Intensidade = `nr` (leve 10, media 20, forte 32 dB). `anlmdn` como alternativa (força 1/10/158). `rnnoise`:
+  ponto de extensão (`arnndn`, 48 kHz) que usa o primeiro `~/.local/share/ai-editor/modelos/rnnoise/*.rnnn`; sem
+  modelo, erro claro (nada é baixado). Trecho opcional por `enable=between(t,…)`.
+  Testes: tom + ruído rosa −48 dB com pausa → pausa −48,1 → **−68,1 dB** (−20 dB, tom intacto −21,1); video_720p
+  (senoide 440 Hz + rosa contínuo, sem pausas): ruído fora de 440 Hz −40,6 → −48,0 (leve) / −50,5 (media) /
+  −50,8 (forte); anlmdn −43,8/−44,6; senoide sempre −21,1/−21,2. Só no trecho 5–10 s: −50,8 dentro, −40,6 fora.
+- [x] Tirar silêncios → `remover_silencios`: `silencedetect` (limiar automático = p10 + máx(6, 30% de p80−p10),
+  entre −60 e −20 dB), margem antes/depois da fala, cortes alinhados aos quadros (0,4 ms antes do quadro, porque o
+  `_cmd_preciso` escreve `-ss` com 3 casas e 8,16667 → 8,167 perderia o quadro: vídeo 1 quadro adiantado por trecho).
+  Reaproveita `_cmd_preciso`; com > 8 trechos corta em lotes de 8 (`-threads 2` por entrada; partes .mkv com áudio
+  FLAC) e junta com o demuxer concat (vídeo copiado, áudio codificado uma vez). Memória: 12 entradas 720p = 800 MB;
+  lote de 8 com 2 threads ≈ 410 MB de pico. Testes: fala_com_silencio 8 s → **6,30 s**; video com 3 s mudos 20 → 17,30 s
+  (vídeo 17,300/áudio 17,343); 30 pausas em 45 s → 29,867 s (4 lotes, 16 s); sincronia medida com flash+bipe em
+  cada trecho: desvio áudio−vídeo ≤ 21 ms (igual ao original, granularidade da medição), sem acúmulo.
+- [x] Fade in/out → `fade_audio` (`afade` com curva; `video=True` → `fade` para `cor`). Teste: áudio −51,9 dB em
+  0–0,1 s, −21 no meio, −55 no fim; luminância 16 (preto) no 1º quadro, 126 no meio, 17 no último.
+- [x] Música de fundo → `musica_fundo` (`-stream_loop -1` para loop, `atrim` + fades + `adelay` + `apad`;
+  `mixar` com `amix normalize=0`, `trocar`, `nova_faixa`; em arquivo só de áudio a nova faixa vira `.mka`).
+  Ducking: `sidechaincompress` com a voz (filtrada 120 Hz–6 kHz) no sidechain; limiar e razão calculados do
+  nível da voz (p80) e do piso para dar ~`ducking_db`. Testes: música −47 dB (banda 220 Hz) sem voz → −58,2 dB com
+  voz (pedido 12, obtido ~11 dB); loop de música de 3 s em 2–15 s presente só nesse trecho, com fades; duração
+  áudio = vídeo (20,010/20,000).
+- [x] Extrair só o áudio: coberto por `exportar` (predefinições `mp3`/`m4a`/`opus`/`ogg`/`wav`/`flac`) e por
+  `faixa_audio(acao='extrair')` — sem ferramenta nova.
+- [ ] DeepFilterNet (redução de ruído com IA) — **pendente, não baixado**. Análise: DeepFilterNet 3 (MIT/Apache-2.0,
+  ok com GPL-3.0). O caminho leve é o executável `deep-filter` (Rust/libDF, ~10–20 MB com o modelo, binário x86_64 nas
+  releases do GitHub) ou os 3 modelos ONNX (~8 MB) no ONNX Runtime da Fase 7; **não** usar o pacote Python (PyTorch,
+  ~700 MB). Roda mais rápido que o tempo real em 1 núcleo (RTF ~0,05), memória < 200 MB: viável na máquina alvo.
+  Trabalha em 48 kHz: ffmpeg extrai a faixa em WAV 48 kHz → `deep-filter` → remonta como versão (mesmo
+  `_editar_audio`). Recomendação: entrar como `metodo='deepfilter'` em `reduzir_ruido`, baixado sob demanda
+  (com confirmação e tamanho) para `~/.local/share/ai-editor/bin`.
+- [ ] Separar voz da música — **pendente, não baixado**. Demucs v4 (`htdemucs`, código e pesos MIT): exige PyTorch
+  (~700 MB–1 GB instalado) + modelo ~80 MB (`htdemucs_ft` ~320 MB); em CPU de notebook ~0,5–1× o tempo real e
+  2–4 GB de RAM em trechos longos (precisa `--segment`): pesado demais para o caminho principal e arriscado com
+  ~4 GB livres. Alternativa: modelos ONNX (htdemucs exportado, ou MDX-Net de voz ~30–60 MB; conferir a licença de
+  cada peso — os da comunidade UVR variam) no ONNX Runtime (MIT, ~50 MB) já previsto na Fase 7, processando em
+  blocos com sobreposição e como tarefa em segundo plano. Recomendação: fazer junto com a Fase 7 (mesmo ambiente de
+  IA sob demanda), saída como faixas novas A2 = voz, A3 = música (`nova_faixa`), reaproveitando o ducking.
+- Limitações: o ducking é aproximado (detector RMS do compressor; ~1 dB a menos que o pedido) e não distingue voz
+  de outros sons na faixa; a redução com `afftdn` só pega ruído estacionário (não tira cliques, vozes de fundo ou
+  ruído que muda); `enable` num trecho liga/desliga o filtro sem transição; `remover_silencios` descarta legendas
+  embutidas e capítulos e recodifica vídeo e áudio; cada edição de áudio recodifica a faixa (AAC 192k em MP4),
+  somando alguns ms de preenchimento no fim; sem DeepFilterNet/RNNoise embutidos, voz com ruído não estacionário
+  fica a cargo do usuário trazer um modelo `.rnnn`. Bug do ffmpeg 6.1 evitado: `amix duration=first` com o vídeo
+  copiado perdia ~85 ms do fim do áudio → usa `duration=longest` (a música já tem a duração exata).
 
 ### Fase 5 — Montagem e análise
 - [ ] Juntar outro arquivo (emendar vídeos diferentes, normalizando resolução/fps/áudio).
@@ -142,14 +241,49 @@ Fluxo: o Claude localiza o objeto nos quadros → segmenta e rastreia → mostra
 - [ ] Tarefas longas em segundo plano: a ferramenta devolve um id, `tarefas` consulta o progresso, a janela mostra a barra.
 
 ### Fase 8 — Distribuição
-- [ ] AppImage com Python embutido (PyInstaller ou Nuitka), Qt, libmpv, ffmpeg estático, mediainfo, exiftool, c2patool.
-- [ ] `ai-editor --instalar`: registra o MCP no Claude Code e no Claude Desktop, cria o `.desktop`, atalho em `~/.local/bin` e associa tipos MIME (opcional).
-- [ ] `--desinstalar` simétrico.
-- [ ] Bundle `.mcpb` para o Claude Desktop apontando para o AppImage.
-- [ ] GitHub Actions: build do AppImage a cada tag e publicação na Release.
-- [ ] Atualização via zsync/AppImageUpdate.
-- [ ] Conformidade GPL: listar componentes, versões e link para o código-fonte de cada binário distribuído.
+- [x] Ponto de entrada único `ai-editor` (`cli.py`): `[arquivo]` abre a janela, `--mcp`, `--diagnostico`,
+  `--instalar [--sem-mime] [--sem-claude]`, `--desinstalar`, `--versao`. Só importa Qt quando abre a janela.
+- [x] AppImage com Python embutido (PyInstaller one-dir), Qt (só módulos usados; plugins de teclado virtual/PDF/GTK3/eglfs
+  podados por `packaging/podar.py`), libmpv + dependências, ffmpeg/ffprobe, mediainfo, exiftool, c2patool.
+  `packaging/build_appimage.sh` (cache em `~/.cache/ai-editor-build`, saída em `dist/`). Build local: ~2,5 min,
+  pico de RAM ok (disponível nunca abaixo de 4,1 GB).
+  - **Tamanho: 233 MB** (zstd 19, blocos de 1 MiB). `COMP=xz` ≈ 213 MB (abre mais devagar).
+    `FFMPEG_ORIGEM=sistema` (ffmpeg 6.1 do Ubuntu, reaproveitando as libav* da libmpv): **164 MB**, com todos os recursos
+    do diagnóstico ✔ — alternativa se o tamanho importar mais que ter o ffmpeg 8.
+  - ffmpeg = build GPL **"shared"** do FFmpeg-Builds (BtbN) n8.1, isolado em `usr/lib/ffmpeg` (RPATH próprio): 2 executáveis
+    estáticos ocupariam ~3x mais. Tem x264, x265, libvpx, opus, SVT-AV1, LAME, ProRes, libass, rubberband, arnndn;
+    **não** tem o filtro `whisper` (`--disable-whisper` nos builds do BtbN).
+  - libmpv/mediainfo vêm do Ubuntu 24.04 com as dependências (ldd), RPATH via patchelf; ficam de fora libc, libstdc++,
+    GL/EGL/DRM/GBM, VA-API/VDPAU, X11/xcb núcleo, Wayland, ALSA/Pulse/PipeWire, fontconfig/freetype/harfbuzz, zlib,
+    D-Bus/systemd/udev (precisam casar com o sistema). Requer glibc ≥ 2.39 (build no Ubuntu 24.04).
+  - exiftool: código Perl em `usr/lib/exiftool` + wrapper que usa o `perl` do sistema.
+  - Testado: `--versao` (0,6 s), `--diagnostico` (tudo `[pacote]`), janela com vídeo (VAAPI ativo, ícones e ondas ok),
+    `estado`/`capturar`/`sair` pelo socket `ai-editor`, `--mcp` (initialize, 21 ferramentas, `metadados` com
+    ffprobe/mediainfo/exiftool/c2pa do pacote, `abrir` abre a janela e ela sobrevive ao fim do MCP).
+  - Empacotado, o MCP abre a janela com `sys.executable -m ai_editor.app`; o `cli.py` reconhece isso e, dentro de
+    AppImage, reexecuta pelo `$APPIMAGE` (a janela ganha a própria montagem e não morre quando o MCP termina).
+- [x] `ai-editor --instalar` (`instalador.py`, só stdlib): atalho `~/.local/bin/ai-editor` (AppImage), `.desktop` + ícone SVG,
+  tipos MIME de vídeo/áudio em `~/.config/mimeapps.list` (lista explícita; `--sem-mime`), MCP no Claude Code
+  (`claude mcp add --scope user`, ou `~/.claude.json` se não houver o comando; pula se não houver Claude Code) e no
+  Claude Desktop (`~/.config/Claude/claude_desktop_config.json`, se a pasta existir). Backup `*.ai-editor.bak`,
+  gravação atômica, manifesto `~/.local/share/ai-editor/instalacao.json` com o valor anterior de cada item.
+  Respeita o modo dev (`ai-editor-dev`, `instalacao-dev.json`). Testado em HOME falso: instalar 2x, restauração idêntica.
+- [x] `--desinstalar` simétrico (restaura MIME/registros anteriores, só onde ninguém mudou depois).
+- [x] Bundle `.mcpb` (MCPB 0.3, tipo `binary`, validado contra o schema oficial): lançador que executa
+  `~/.local/bin/ai-editor --mcp` (ou o AppImage em ~/Applications, ~/Downloads). `packaging/mcpb/empacotar_mcpb.py`
+  lê a versão e a lista de ferramentas do próprio servidor.
+- [x] GitHub Actions: `release.yml` (tag `v*` → build, testes do AppImage, SHA256SUMS, Release com AppImage, .zsync,
+  .mcpb, COMPONENTES.txt, LICENCAS_TERCEIROS.md) e `ci.yml` (push/PR em dev/main: compileall, testes, instalador em
+  HOME falso, initialize do MCP). Ainda não rodaram no GitHub.
+- [x] `deploy.sh X.Y.Z [--dry-run] [--push]`: confere main limpa, compileall, sobe a versão, commit + tag; push só com `--push`.
+- [x] Atualização via zsync: informação `gh-releases-zsync|rlb3ssa|ai-editor|latest|AI_Editor-*x86_64.AppImage.zsync`
+  embutida e `.zsync` gerado (zsyncmake extraído do .deb do Ubuntu quando não instalado).
+- [x] Conformidade GPL: `packaging/LICENCAS_TERCEIROS.md` (licenças, links de fonte, oferta escrita) e `COMPONENTES.txt`
+  gerado no build (versões exatas, pacote Debian de origem e link Launchpad de cada `.so`), ambos em
+  `usr/share/doc/ai-editor/` dentro do AppImage. Releases devem sair do CI: na máquina local alguns pacotes são
+  versões ESM (Ubuntu Pro), cujo fonte não é público no Launchpad.
 - [ ] Testar numa sessão Wayland real.
+- [ ] Reduzir mais: compilar a libmpv contra as libav* do build do BtbN (eliminaria a segunda cópia do ffmpeg, ~70 MB).
 
 ### Depois
 - [ ] Outras plataformas (Windows/macOS) — a render API já ajuda.
@@ -174,15 +308,15 @@ Decidido em 2026-11-09. Registro em `src/ai_editor/binarios.py` (`REGISTRO` e `R
 ### 5.1 Embutido no pacote (offline desde o primeiro uso)
 | Ferramenta | Para quê | Licença | Tamanho aprox. |
 |---|---|---|---|
-| ffmpeg + ffprobe (estático) | edições, análise, exportação. Precisa de: libx264, libvpx-vp9, libopus, aac. Desejável: libx265, libsvtav1, libmp3lame, prores_ks, libass (`subtitles`), rubberband, arnndn | GPL | ~80 MB |
+| ffmpeg + ffprobe (build GPL "shared" do FFmpeg-Builds n8.1, isolado em `usr/lib/ffmpeg`) | edições, análise, exportação. Precisa de: libx264, libvpx-vp9, libopus, aac. Desejável: libx265, libsvtav1, libmp3lame, prores_ks, libass (`subtitles`), rubberband, arnndn | GPL-3.0 | ~220 MB descomp. |
 | libmpv + dependências | reprodução com aceleração por hardware | GPL/LGPL | ~40 MB |
 | mediainfo | metadados detalhados | BSD-2 | ~10 MB |
-| exiftool | metadados de câmera/GPS/XMP; usa o Perl do sistema e leva um Perl mínimo se faltar | Artistic/GPL | ~25 MB |
+| exiftool | metadados de câmera/GPS/XMP; usa o Perl do sistema (o pacote não leva Perl) | Artistic/GPL | ~21 MB |
 | c2patool | Content Credentials (procedência, "gerado por IA") | MIT/Apache-2.0 | ~20 MB |
-| modelo RNNoise | redução de ruído básica (`arnndn`) | BSD | < 1 MB |
+| modelo RNNoise | redução de ruído básica (`arnndn`) — ainda não incluído (entra com a Fase 4) | BSD | < 1 MB |
 | Python + PySide6 (só módulos usados), python-mpv, numpy, qtawesome, mcp | o app | LGPL/MIT/BSD | ~120 MB |
 
-Meta: AppImage comprimido com ~150–200 MB.
+Meta: AppImage comprimido com ~150–250 MB. Obtido: **233 MB** (164 MB com `FFMPEG_ORIGEM=sistema`).
 
 ### 5.2 Sob demanda (baixado no primeiro uso, com confirmação e tamanho)
 Destino: `~/.local/share/ai-editor/bin` e `~/.local/share/ai-editor/modelos`.
@@ -200,10 +334,12 @@ Destino: `~/.local/share/ai-editor/bin` e `~/.local/share/ai-editor/modelos`.
 - `xdg-mime` → `--instalar` escreve `mimeapps.list` direto (usa `xdg-mime` só se existir).
 
 ### 5.4 Só para construir
-PyInstaller ou Nuitka, linuxdeploy, appimagetool, GitHub Actions.
+PyInstaller (dev; GPL com exceção do bootloader), appimagetool (MIT), patchelf (GPL-3.0), zsyncmake (Artistic-2.0),
+GitHub Actions. Não usamos linuxdeploy: as dependências são resolvidas com `ldd` no `build_appimage.sh`.
 
 ### 5.5 A confirmar
-- Se os builds estáticos do ffmpeg 8 trazem o filtro `whisper` (dispensaria o whisper.cpp).
+- ~~Se os builds estáticos do ffmpeg 8 trazem o filtro `whisper`~~ — **não**: o FFmpeg-Builds (BtbN) usa `--disable-whisper`
+  (verificado em 2026-11-10 no n8.1). Transcrição continua via whisper.cpp sob demanda.
 
 ## 6. Licença e dependências
 
@@ -220,6 +356,13 @@ Projeto: **GPL-3.0**.
 | SAM 2.1 | Apache-2.0 | ok com GPL-3.0 |
 | LaMa | Apache-2.0 | ok com GPL-3.0 |
 | ProPainter | NTU S-Lab 1.0 (não comercial) | **evitar no pacote**; no máximo opcional |
+| mediainfo (+ libmediainfo, libzen) | BSD-2-Clause | no AppImage, do Ubuntu |
+| exiftool | Artistic / GPL-1.0+ | no AppImage (código Perl) |
+| c2patool | MIT / Apache-2.0 | no AppImage (binário oficial) |
+| PyInstaller (bootloader) | GPL-2.0 com exceção | ok; só o bootloader vai no pacote |
+| runtime do AppImage, appimagetool | MIT | ok |
+
+Lista completa e links de código-fonte: `packaging/LICENCAS_TERCEIROS.md` e `COMPONENTES.txt` (gerado no build).
 
 ## 7. Decisões
 - 2026-11-09: foco inicial só em Linux; distribuição por AppImage.
@@ -230,6 +373,7 @@ Projeto: **GPL-3.0**.
 - 2026-11-10: roadmap reordenado (exportar → imagem → áudio → montagem → legendas → objetos → distribuição); `--instalar` e AppImage ficam por último.
 - 2026-11-10: "pistas de origem" são regras locais (`core._PISTAS_*`), sem IA: funcionam offline e sem o Claude conectado.
 - 2026-11-10: exportação = ferramenta única `exportar` com predefinições em tabela; foto de quadro é predefinição (`png`/`jpg`), não ferramenta separada. Instagram horizontal usa fundo desfocado por padrão. O painel da janela é uma sobreposição (como o de metadados), para aparecer no `capturar`.
+- 2026-11-10: combinação inválida de predefinição e extensão (ex.: youtube → `.webm`, whatsapp → `.gif`) dá erro claro em vez de trocar a extensão: o destino pedido nunca é alterado em silêncio. Largura/altura ímpares são arredondadas para par. Foto em 'fim' ou além do fim = último quadro (com aviso se passou), descontando o atraso do vídeo no contêiner como `congelar_quadro`. Trecho com fim ≤ início é erro; trecho cortado pelo fim do vídeo gera aviso. Pelo MCP, se `arquivo` não é o vídeo da janela, tempos relativos à janela ('m1', 'atual', 'in'...) são erro.
 
 ## 8. Questões em aberto
 - Manter o idioma da interface em português ou adicionar i18n desde já?

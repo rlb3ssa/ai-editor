@@ -1,6 +1,7 @@
 """Ponto de entrada único do AI Editor (comando `ai-editor` e executável do AppImage).
 
     ai-editor [arquivo]                abre a janela (ou encaminha o arquivo para a janela já aberta)
+    ai-editor -- -arquivo.mp4          `--` encerra as opções (arquivos cujo nome começa com "-")
     ai-editor --mcp                    servidor MCP (stdio) — é o que o Claude executa
     ai-editor --diagnostico            ferramentas externas encontradas e o que falta
     ai-editor --instalar [--sem-mime] [--sem-claude]
@@ -55,6 +56,14 @@ def main() -> None:
             for var in ("APPDIR", "ARGV0", "OWD"):
                 os.environ.pop(var, None)
             os.execv(appimage, [appimage, *args])
+
+    # `--` separa opções de arquivos: o que vem depois é sempre arquivo, mesmo começando com "-".
+    # A janela ignora argumentos que começam com "-", então esses viram caminho absoluto (/pasta/-video.mp4).
+    if "--" in args:
+        i = args.index("--")
+        arquivos = [os.path.abspath(a) if a.startswith("-") else a for a in args[i + 1:]]
+        args = args[:i]
+        sys.argv = [sys.argv[0], *args, *arquivos]
 
     if "--mcp" in args:
         sys.argv = [sys.argv[0]]

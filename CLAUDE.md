@@ -78,11 +78,27 @@ cancelar/fechar/estado, `predefinicao`, `trecho`=índice no combo, `limite_mb`, 
 - Corte preciso: uma entrada por trecho (`-ss a -t d -i arq`) + `concat` no `filter_complex`, reaplicando as
   tags das faixas (idioma/título). O modo rápido (`-c copy`) não é exato no quadro.
 - Ícones: QtAwesome, Phosphor (`ph.*`) por padrão; nomes no código são os do MDI e traduzidos em `_PHOSPHOR`.
-- Exportar ≠ editar: `core.exportar` cria arquivo novo (nunca sobrescreve; `_finalizar` usa `os.link`) e não
-  registra versão. Predefinições são dados em `core.PREDEFINICOES`. Progresso: `-progress pipe:1` (`out_time_us`).
+- Exportar ≠ editar: `core.exportar` cria arquivo novo e não registra versão. Nunca sobrescreve e aguenta
+  exportações simultâneas: `_reservar` cria o nome final com `O_EXCL`, o ffmpeg grava num `mkstemp` oculto
+  (`.nome.ext.XXXXXXXX.parcial.ext`) e `_publicar` faz `os.replace` sobre a reserva. O ffmpeg roda com
+  `PR_SET_PDEATHSIG` (morre junto com o processo/thread que o criou); `.parcial` com mais de 10 min na pasta de
+  destino são órfãos e `_limpar_orfaos` os remove. Janela: `painel_exportar.encerrar()` antes do `execv` da
+  recarga e no `closeEvent`. Predefinições são dados em `core.PREDEFINICOES`. Progresso: `-progress pipe:1` (`out_time_us`).
   Painéis sobre a janela devem ser widgets filhos (não `QDialog`), senão não aparecem no `capturar`.
+- Edições de imagem (Fase 3, `core.py` seção "imagem"): `_editar_quadros` (só quadros; áudio/legendas copiados)
+  e `_editar_linha_tempo` (velocidade/congelar: uma entrada `-ss/-t` por segmento + `concat`; **nunca** `split` +
+  `trim` para segmentos, que guarda quadros decodificados na memória). Valores de texto/caminho/expressão no
+  `-filter_complex` passam por `core.esc_filtro` (2 níveis de escape; `drawtext` com `expansion=none`).
+  Quadro "exibido em t": desconte o `start_time` do vídeo em relação ao do contêiner (MKV costuma ter 0,021 s).
 - WebM com alfa: o ffprobe (decodificador VP9 nativo) mostra `yuv420p`; o alfa está na tag `alpha_mode=1` e só
-  o `libvpx-vp9` decodifica (`ffmpeg -c:v libvpx-vp9 -i arq.webm`).
+  o `libvpx-vp9` decodifica (`ffmpeg -c:v libvpx-vp9 -i arq.webm`). Em comandos novos use `core._dec_entrada(stream)`
+  antes de **cada** `-i`.
+- Áudio (Fase 4, `core.py` seção "áudio"): `_editar_audio` (vídeo/faixas não tocadas copiados). `afftdn` só reduz de
+  verdade com `nf` ≈ ruído RMS + 18 dB (o default −50 quase não faz nada); perfil de ruído = trecho de pausa posto
+  antes do áudio (`concat`) + `asendcmd` `sn start/stop` + `atrim`. `amix duration=first` com vídeo copiado perde
+  ~85 ms do fim no ffmpeg 6.1: use `duration=longest` com as entradas já do tamanho certo. Cortes em tempos de quadro:
+  `_cmd_preciso` formata `-ss` com 3 casas (8,16667 → 8,167 perde o quadro); desconte 0,4 ms. Muitos trechos no
+  corte preciso = muitos decodificadores abertos: lotes de 8 com `-threads 2` (`_cortar_preciso`).
 
 ## Git
 - Trabalhe na branch **`dev`**. Commits pequenos, mensagem em português no imperativo

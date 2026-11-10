@@ -5,6 +5,7 @@ Usado tanto pela janela (app.py) quanto pelo servidor MCP (mcp_server.py).
 from __future__ import annotations
 
 import datetime as _dt
+import functools
 import hashlib
 import json
 import os
@@ -858,10 +859,51 @@ def resolver_predefinicao(predefinicao: str | None = None, formato: str | None =
     if fmt and predefinicao and fmt != p["ext"].lstrip("."):
         ext = "." + fmt  # ex.: predefinicao="youtube", formato="mkv"
     if ext:
+        _validar_conteiner(nome, p, ext)
         p["ext"] = ext
         if not predefinicao:
             p["sufixo"] = ext.lstrip(".")  # formato="mkv" → video.mkv
     return nome, p
+
+
+# codecs que cada contêiner aceita (None = qualquer um); usado para recusar combinações que o ffmpeg rejeitaria
+_CONTEINER_CODECS: dict[str, set | None] = {
+    ".mp4": {"h264", "h265", "vp9", "aac", "mp3", "opus"}, ".m4v": {"h264", "h265", "aac", "mp3"},
+    ".mov": {"h264", "h265", "prores", "aac", "mp3", "pcm", "wav"}, ".mkv": None,
+    ".webm": {"vp9", "opus"}, ".ts": {"h264", "h265", "aac", "mp3"}, ".avi": {"h264", "mp3", "pcm", "wav"},
+}
+
+
+def _validar_conteiner(nome: str, p: dict, ext: str) -> None:
+    """Erro claro se a predefinição não cabe na extensão pedida (formato ou destino), em vez de deixar o
+    ffmpeg falhar. Decisão: não troca a extensão sozinho; pede outra extensão ou outra predefinição."""
+    ext = ext.lower()
+    padrao = PREDEFINICOES[nome]["ext"]
+    if ext == padrao:
+        return
+    if p["tipo"] == "imagem":
+        ok = ext in (".jpg", ".jpeg") and padrao == ".jpg"
+    elif p["tipo"] in ("audio", "gif"):
+        ok = p["tipo"] == "audio" and ext == ".mka"
+    else:
+        aceitos = _CONTEINER_CODECS.get(ext, set())
+        ok = ext in _CONTEINER_CODECS and (aceitos is None or all(
+            p[k] in aceitos for k in ("video", "audio") if p.get(k)))
+    if not ok:
+        codecs = "+".join(str(p[k]) for k in ("video", "audio") if p.get(k)) or p["tipo"]
+        raise ValueError(f"a predefinição '{nome}' gera {codecs} ({padrao}), que não cabe em '{ext}'; "
+                         f"use a extensão {padrao} ou outra predefinição (ex.: webm para .webm, gif para .gif, "
+                         f"mp3 para .mp3)")
+
+
+def _ext_destino(destino) -> str | None:
+    """Extensão do destino quando ele é um ARQUIVO (mesma regra de _caminho); None se for pasta."""
+    if not destino:
+        return None
+    d = Path(str(destino)).expanduser()
+    if d.is_dir() or str(destino).endswith("/") or not d.suffix:
+        return None
+    return d.suffix
 
 
 def _livre(p: Path) -> Path:
@@ -905,6 +947,8 @@ def caminho_exportacao(arquivo: Path | str, predefinicao: str | None = None, for
     `destino`), numerado (`nome.whatsapp.2.mp4`) se já existir. `destino` com extensão = nome de arquivo pedido."""
     original = Documento(arquivo).original
     nome, p = resolver_predefinicao(predefinicao, formato, destino)
+    if _ext_destino(destino):
+        _validar_conteiner(nome, p, _ext_destino(destino))
     return _caminho(original, _sufixo(nome, p, tempo), p["ext"], destino)
 
 
@@ -1001,8 +1045,9 @@ def _args_video(p: dict, crf: int | None, kbps: int | None, passe: int | None, l
 
 
 def _cadeia_video(p: dict, w: int, h: int, fps_origem: float, largura, altura, fps, enquadramento,
-                  ent: str, sai: str) -> list[str]:
-    """Filtros de vídeo da exportação, de [ent] para [sai] (pode ter várias partes)."""
+                  ent: str, sai: str, cor: str = "black") -> list[str]:
+    """Filtros de vídeo da exportação, de [ent] para [sai] (pode ter várias partes).
+    Também usada por `mudar_proporcao` (edição). `cor`: cor das barras no enquadramento 'barras'."""
     partes: list[str] = []
     f: list[str] = []
     fps_alvo = fps or p.get("fps")
@@ -1012,14 +1057,14 @@ def _cadeia_video(p: dict, w: int, h: int, fps_origem: float, largura, altura, f
         f.append(f"fps={fps_alvo:g}")
     tela = p.get("tela")
     if tela:
-        L, A = int(largura or tela[0]), int(altura or tela[1])
+        L, A = _par_exp(largura or tela[0]), _par_exp(altura or tela[1])
         modo = (enquadramento or p.get("enquadramento") or "desfocado").lower()
         mesma = w and h and abs(w / h - L / A) < 0.02
         if mesma or modo == "recorte":
             f.append(f"scale={L}:{A}:force_original_aspect_ratio=increase,crop={L}:{A},setsar=1")
         elif modo == "barras":
             f.append(f"scale={L}:{A}:force_original_aspect_ratio=decrease,"
-                     f"pad={L}:{A}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1")
+                     f"pad={L}:{A}:(ow-iw)/2:(oh-ih)/2:color={cor},setsar=1")
         elif modo == "desfocado":
             # fundo: o próprio vídeo ampliado, recortado e desfocado (em baixa resolução, barato)
             pl, pa = max(2, L // 4 // 2 * 2), max(2, A // 4 // 2 * 2)
@@ -1033,11 +1078,12 @@ def _cadeia_video(p: dict, w: int, h: int, fps_origem: float, largura, altura, f
         else:
             raise ValueError("enquadramento: 'desfocado', 'recorte' ou 'barras'")
     elif largura or altura:
+        # dimensões pares: yuv420p (H.264/H.265/VP9) não aceita ímpares
         if largura and altura:
-            f.append(f"scale={int(largura)}:{int(altura)}:force_original_aspect_ratio=decrease:"
+            f.append(f"scale={_par_exp(largura)}:{_par_exp(altura)}:force_original_aspect_ratio=decrease:"
                      f"force_divisible_by=2,setsar=1")
         else:
-            f.append(f"scale={int(largura) if largura else -2}:{int(altura) if altura else -2},setsar=1")
+            f.append(f"scale={_par_exp(largura) if largura else -2}:{_par_exp(altura) if altura else -2},setsar=1")
     elif p.get("lado_menor_max") and min(w, h) > p["lado_menor_max"]:
         m = p["lado_menor_max"]
         f.append(f"scale=-2:{m},setsar=1" if w >= h else f"scale={m}:-2,setsar=1")
@@ -1058,12 +1104,114 @@ def _cadeia_video(p: dict, w: int, h: int, fps_origem: float, largura, altura, f
     return partes
 
 
+def _par_exp(v) -> int:
+    """Arredonda uma dimensão pedida para o par mais próximo (mínimo 2)."""
+    return max(2, int(round(float(v) / 2)) * 2)
+
+
+try:  # o ffmpeg recebe SIGTERM se a thread que o criou morrer (fechar/travar a janela ou o MCP)
+    import ctypes as _ctypes
+    import signal as _signal
+    _prctl = _ctypes.CDLL(None, use_errno=True).prctl
+except (OSError, AttributeError):
+    _prctl = None
+
+
+def _morrer_com_pai() -> None:  # preexec_fn: roda no filho, entre fork e exec
+    if _prctl is not None:
+        _prctl(1, int(_signal.SIGTERM), 0, 0, 0)  # PR_SET_PDEATHSIG
+
+
+def _tem_alfa(s: dict) -> bool:
+    tags = {k.lower(): v for k, v in (s.get("tags") or {}).items()}
+    pf = s.get("pix_fmt") or ""
+    return str(tags.get("alpha_mode", "")) == "1" or pf.startswith(("yuva", "rgba", "bgra", "argb", "abgr", "gbrap", "ya"))
+
+
+def _dec_entrada(s: dict | None) -> list[str]:
+    """Decodificador a forçar antes do -i: WebM VP8/VP9 com alfa só mantém a transparência no libvpx
+    (o decodificador nativo descarta o canal alfa)."""
+    if not s:
+        return []
+    tags = {k.lower(): v for k, v in (s.get("tags") or {}).items()}
+    if str(tags.get("alpha_mode", "")) != "1":
+        return []
+    dec = {"vp9": "libvpx-vp9", "vp8": "libvpx"}.get(s.get("codec_name"))
+    lista = binarios._lista_ffmpeg("decoders")
+    if not dec or (lista and dec not in lista):
+        return []
+    return ["-c:v", dec]
+
+
+# temporário da exportação: .<nome final>.<8 aleatórios>.parcial.<ext>, ao lado do arquivo final
+_RX_PARCIAL = re.compile(r"^\.(?P<final>.+)\.[a-z0-9_]{8}\.parcial(?P<ext>\.[A-Za-z0-9]+)$")
+_ORFAO_S = 600  # temporário sem escrita há 10 min = órfão (os ativos são "tocados" a cada 30 s)
+
+
+def _reservar(final: Path) -> Path:
+    """Cria o arquivo final VAZIO com O_EXCL (reserva atômica do nome); se já existir, tenta o próximo."""
+    while True:
+        final = _livre(final)
+        try:
+            os.close(os.open(final, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644))
+            return final
+        except FileExistsError:
+            continue
+
+
+def _temporario(final: Path) -> Path:
+    fd, nome = tempfile.mkstemp(prefix=f".{final.name}.", suffix=f".parcial{final.suffix}", dir=final.parent)
+    try:  # mkstemp cria com 0600; usa as permissões da reserva (0644 menos a umask), como um arquivo comum
+        os.fchmod(fd, final.stat().st_mode & 0o777)
+    finally:
+        os.close(fd)
+    return Path(nome)
+
+
+def _soltar_reserva(final: Path) -> None:
+    try:
+        if final.exists() and final.stat().st_size == 0:
+            final.unlink()
+    except OSError:
+        pass
+
+
+def _limpar_orfaos(pasta: Path) -> list[str]:
+    """Apaga temporários de exportações interrompidas (padrão estrito, sem escrita há 10 min) e a reserva vazia
+    correspondente. Só na pasta de destino em uso."""
+    import time as _time
+    apagados = []
+    try:
+        itens = list(pasta.iterdir())
+    except OSError:
+        return apagados
+    agora = _time.time()
+    for f in itens:
+        m = _RX_PARCIAL.match(f.name)
+        if not m or not f.name.endswith(m.group("ext")) or not f.is_file():
+            continue
+        try:
+            if agora - f.stat().st_mtime < _ORFAO_S:
+                continue
+            f.unlink()
+            apagados.append(f.name)
+            reserva = pasta / m.group("final")
+            if reserva.suffix == m.group("ext") and reserva.is_file() and reserva.stat().st_size == 0 \
+                    and agora - reserva.stat().st_mtime >= _ORFAO_S:
+                reserva.unlink()
+        except OSError:
+            pass
+    return apagados
+
+
 def _rodar_com_progresso(cmd: list[str], dur: float, progresso=None, base: float = 0.0, peso: float = 1.0,
                          cancelar=None) -> None:
-    """Roda o ffmpeg lendo `-progress pipe:1` e chama progresso(fração 0..1)."""
+    """Roda o ffmpeg lendo `-progress pipe:1` e chama progresso(fração 0..1). O ffmpeg morre junto com a
+    thread que o criou (PR_SET_PDEATHSIG); cancelar() → True o interrompe."""
     cmd = cmd[:1] + ["-progress", "pipe:1", "-nostats"] + cmd[1:]
     with tempfile.TemporaryFile("w+") as err:
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=err, text=True)
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=err, text=True,
+                                preexec_fn=_morrer_com_pai if _prctl is not None else None)
         try:
             for linha in proc.stdout:
                 if cancelar and cancelar():
@@ -1088,21 +1236,12 @@ def _rodar_com_progresso(cmd: list[str], dur: float, progresso=None, base: float
         progresso(base + peso)
 
 
-def _finalizar(tmp: Path, final: Path) -> Path:
-    """Move o arquivo temporário para o nome final sem nunca sobrescrever (link atômico)."""
-    while True:
-        final = _livre(final)
-        try:
-            os.link(tmp, final)
-            tmp.unlink()
-            return final
-        except FileExistsError:
-            continue
-        except OSError:  # sistema de arquivos sem hardlink (ex.: FAT)
-            if final.exists():
-                continue
-            os.replace(tmp, final)
-            return final
+def _publicar(tmp: Path, final: Path) -> Path:
+    """O temporário (já completo) substitui a reserva vazia do nome final."""
+    if not tmp.exists() or tmp.stat().st_size == 0:
+        raise ErroFFmpeg("o ffmpeg terminou sem gerar o arquivo")
+    os.replace(tmp, final)
+    return final
 
 
 def info_arquivo(caminho: Path) -> dict:
@@ -1153,6 +1292,9 @@ def exportar(arquivo: Path | str, predefinicao: str | None = None, formato: str 
     if not entrada.exists():
         raise FileNotFoundError(f"arquivo não encontrado: {entrada}")
     nome, p = resolver_predefinicao(predefinicao, formato, destino)
+    ext_dest = _ext_destino(destino)
+    if ext_dest:
+        _validar_conteiner(nome, p, ext_dest)
     probe = ffprobe(entrada)
     dur = duracao(probe)
     est = dict(estado or {})
@@ -1166,42 +1308,98 @@ def exportar(arquivo: Path | str, predefinicao: str | None = None, formato: str 
     if tipo == "audio" and not auds:
         raise ValueError("o arquivo não tem áudio")
     avisos: list[str] = []
+    dec = _dec_entrada(vids[0]) if vids and tipo != "audio" else []
+    if p.get("alfa") and vids and not _tem_alfa(vids[0]):
+        avisos.append("a origem não tem transparência: o canal alfa sai todo opaco")
+    import time as _time
+    toque = [_time.monotonic()]
+
+    def _prog(tmp: Path):
+        """Repassa o progresso e mantém o temporário 'vivo' (mtime) para a limpeza de órfãos."""
+        def f(x):
+            if _time.monotonic() - toque[0] > 30:
+                toque[0] = _time.monotonic()
+                try:
+                    os.utime(tmp)
+                except OSError:
+                    pass
+            if progresso:
+                progresso(x)
+        return f
 
     # ---------------- foto de um quadro
     if tipo == "imagem":
         if tempo is None:
             tempo = "atual" if est.get("posicao") is not None else 0
         t = parse_tempo(tempo, est)
+        if t < 0:
+            raise ValueError(f"tempo negativo: {tempo}")
         fq = _fps_stream(vids[0])
+        # atraso do vídeo em relação ao início do arquivo (ex.: MKV com vídeo em 0,021 s), como em
+        # congelar_quadro: o quadro n é exibido em o + n/fps no tempo do player
+        try:
+            o = max(0.0, float(vids[0].get("start_time") or 0) - float(probe.get("format", {}).get("start_time") or 0))
+        except ValueError:
+            o = 0.0
+        # dur_v = duração do stream de vídeo (contada a partir do seu primeiro quadro); MKV não informa a do
+        # stream, e a do contêiner inclui o atraso
+        try:
+            dur_v = float(vids[0].get("duration") or 0) or max(0.0, dur - o)
+        except ValueError:
+            dur_v = max(0.0, dur - o)
         n = None
-        ss = max(0.0, t)
+        ss = t
+        no_fim = False
         if fq:
             # quadro exibido no instante t = o último que começa em ou antes de t. Com busca precisa o ffmpeg
             # entrega o primeiro quadro com pts >= ss; meio quadro antes garante exatamente o quadro n.
-            n = int(t * fq + 1e-6)
-            ss = max(0.0, (n - 0.5) / fq)
-        final = _caminho(doc.original, _sufixo(nome, p, t), p["ext"], destino, criar=True)
-        tmp = final.with_name(f".{final.stem}.parcial{final.suffix}")
-        cmd = FFMPEG + ["-ss", f"{ss:.6f}", "-i", str(entrada), "-map", "0:V:0", "-frames:v", "1",
-                        "-map_metadata", "-1"]
+            n = max(0, int((t - o) * fq + 1e-6))
+            ultimo = max(0, int(-(-(dur_v * fq - 1e-6) // 1)) - 1) if dur_v else None  # teto - 1
+            if ultimo is not None and n >= ultimo:
+                # 'fim' ou além: vale o último quadro (lido decodificando o final e ficando com o último)
+                if t > o + dur_v + 1e-3:
+                    avisos.append(f"{fmt_tempo(t)} passa do fim do vídeo ({fmt_tempo(o + dur_v)}): foto do último quadro")
+                n, no_fim = ultimo, True
+                t = min(t, o + ultimo / fq)
+            ss = max(0.0, o + (n - 0.5) / fq)
+        elif dur_v and t >= o + dur_v:
+            no_fim = True
+        final = _reservar(_caminho(doc.original, _sufixo(nome, p, t), p["ext"], destino, criar=True))
+        _limpar_orfaos(final.parent)
+        tmp = _temporario(final)
+        if no_fim:
+            cmd = FFMPEG + ["-sseof", f"-{max(1.0, 3 / fq) if fq else 1.0:.3f}"] + dec + ["-i", str(entrada),
+                            "-map", "0:V:0", "-map_metadata", "-1"]
+        else:
+            cmd = FFMPEG + ["-ss", f"{ss:.6f}"] + dec + ["-i", str(entrada), "-map", "0:V:0", "-frames:v", "1",
+                            "-map_metadata", "-1"]
         if largura or altura:
             cmd += ["-vf", f"scale={int(largura) if largura else -2}:{int(altura) if altura else -2}"]
         if p["ext"] == ".jpg":
             cmd += ["-q:v", "2"]
-        cmd += ["-update", "1", str(tmp)]
+        cmd += ["-update", "1", str(tmp)]  # com -update, no fim fica gravado o último quadro decodificado
+        ok = False
         try:
             rodar(cmd)
-            final = _finalizar(tmp, final)
+            if not tmp.exists() or tmp.stat().st_size == 0:
+                raise ValueError(f"não há quadro em {fmt_tempo(t)} (o vídeo tem {fmt_tempo(o + dur_v)})")
+            final = _publicar(tmp, final)
+            ok = True
         finally:
             tmp.unlink(missing_ok=True)
+            if not ok:
+                _soltar_reserva(final)
         if progresso:
             progresso(1.0)
         r = info_arquivo(final)
         r.pop("duracao", None)
         r.pop("duracao_fmt", None)
         r.get("video", {}).pop("fps", None)
-        return {**r, "predefinicao": nome, "tempo": round(t, 3), "tempo_fmt": fmt_tempo(t), "quadro": n,
-                "origem": str(entrada), "comandos": [shlex.join(cmd)]}
+        r = {**r, "predefinicao": nome, "tempo": round(t, 3), "tempo_fmt": fmt_tempo(t), "quadro": n,
+             "origem": str(entrada), "comandos": [shlex.join(cmd)]}
+        if avisos:
+            r["avisos"] = avisos
+        return r
 
     # ---------------- trechos
     lista = None
@@ -1212,12 +1410,17 @@ def exportar(arquivo: Path | str, predefinicao: str | None = None, formato: str 
                   parse_tempo(fim if fim is not None else "fim", est))]
     if lista is not None:
         limpos = []
-        for a, b in lista:
-            a, b = max(0.0, a), min(dur, b) if dur else b
-            if b - a > 0.001:
-                limpos.append((a, b))
-        if not limpos:
-            raise ValueError("nenhum trecho válido (verifique os tempos)")
+        for i, (a, b) in enumerate(lista, 1):
+            rot = f"trecho {i} ({fmt_tempo(a)} → {fmt_tempo(b)})"
+            if b - a <= 0.001:
+                raise ValueError(f"{rot}: o fim precisa ser depois do início")
+            if dur and a >= dur - 0.001:
+                raise ValueError(f"{rot} começa depois do fim do arquivo ({fmt_tempo(dur)})")
+            if a < 0:
+                avisos.append(f"{rot}: início negativo, começa em 0")
+            if dur and b > dur + 0.001:
+                avisos.append(f"{rot} foi cortado no fim do arquivo ({fmt_tempo(dur)})")
+            limpos.append((max(0.0, a), min(dur, b) if dur else b))
         lista = limpos
         dur_saida = sum(b - a for a, b in lista)
     else:
@@ -1244,9 +1447,9 @@ def exportar(arquivo: Path | str, predefinicao: str | None = None, formato: str 
     entradas: list[str] = []
     if lista:
         for a, b in lista:
-            entradas += ["-ss", f"{a:.3f}", "-t", f"{b - a:.3f}", "-i", str(entrada)]
+            entradas += ["-ss", f"{a:.3f}", "-t", f"{b - a:.3f}"] + dec + ["-i", str(entrada)]
     else:
-        entradas += ["-i", str(entrada)]
+        entradas += dec + ["-i", str(entrada)]
     w, h = _dimensoes(vids[0]) if vids else (0, 0)
     fps_origem = _fps_stream(vids[0]) if vids else 0.0
 
@@ -1291,8 +1494,8 @@ def exportar(arquivo: Path | str, predefinicao: str | None = None, formato: str 
     if alvo_mb:
         if tipo == "gif" or p.get("video") == "prores" or (tipo == "audio" and p.get("audio") in ("wav", "flac")):
             raise ValueError(f"'{nome}' não tem controle de tamanho; alvo_mb vale para vídeo e áudio comprimido")
-        # margem para o contêiner e o erro do controle de taxa (o x265 erra um pouco mais para cima)
-        total_kbits = alvo_mb * _MB * 8 / 1000 * (0.97 if p.get("video") == "h265" else 0.985)
+        # margem para o contêiner e o erro do controle de taxa (x265 e libvpx erram um pouco mais para cima)
+        total_kbits = alvo_mb * _MB * 8 / 1000 * (0.97 if p.get("video") in ("h265", "vp9") else 0.985)
         if tipo == "audio":
             k = int(total_kbits / max(dur_saida, 0.1) / len(idx_a))
             if k < 32:
@@ -1324,8 +1527,10 @@ def exportar(arquivo: Path | str, predefinicao: str | None = None, formato: str 
                           f"exportado sem limite (use alvo_mb para forçar ou exporte um trecho)")
 
     crf = _crf(p, qualidade) if tem_v else None
-    final = _caminho(doc.original, _sufixo(nome, p), p["ext"], destino, criar=True)
-    tmp = final.with_name(f".{final.stem}.parcial{final.suffix}")
+    final = _reservar(_caminho(doc.original, _sufixo(nome, p), p["ext"], destino, criar=True))
+    _limpar_orfaos(final.parent)
+    tmp = _temporario(final)
+    prog = _prog(tmp)
     meta = ["-map_metadata", "-1"] if tipo == "gif" else ["-map_metadata", "0"]
     if lista or tipo == "gif":
         meta += ["-map_chapters", "-1"]
@@ -1334,13 +1539,14 @@ def exportar(arquivo: Path | str, predefinicao: str | None = None, formato: str 
         saida_extra = ["-loop", "0"]
     comandos: list[list[str]] = []
     logdir = None
+    ok = False
     try:
         a_args = _args_audio(p, canais, kbps_a_forcado) if idx_a else ["-an"]
         if tipo == "audio":
             args, _ = montar(True)
             cmd = FFMPEG + entradas + args + ["-vn"] + a_args + meta + saida_extra + [str(tmp)]
             comandos.append(cmd)
-            _rodar_com_progresso(cmd, dur_saida, progresso, cancelar=cancelar)
+            _rodar_com_progresso(cmd, dur_saida, prog, cancelar=cancelar)
         elif kbps_video:
             CACHE_DIR.mkdir(parents=True, exist_ok=True)
             logdir = Path(tempfile.mkdtemp(prefix="2passes-", dir=CACHE_DIR))
@@ -1352,17 +1558,20 @@ def exportar(arquivo: Path | str, predefinicao: str | None = None, formato: str 
             cmd2 = (FFMPEG + entradas + args2 + _args_video(p, crf, kbps_video, 2, log, None)
                     + a_args + meta + saida_extra + [str(tmp)])
             comandos += [cmd1, cmd2]
-            _rodar_com_progresso(cmd1, dur_saida, progresso, 0.0, 0.5, cancelar)
-            _rodar_com_progresso(cmd2, dur_saida, progresso, 0.5, 0.5, cancelar)
+            _rodar_com_progresso(cmd1, dur_saida, prog, 0.0, 0.5, cancelar)
+            _rodar_com_progresso(cmd2, dur_saida, prog, 0.5, 0.5, cancelar)
         else:
             args, _ = montar(True)
             v_args = [] if tipo == "gif" else _args_video(p, crf, None, None, None, teto)
             cmd = FFMPEG + entradas + args + v_args + (a_args if tipo != "gif" else []) + meta + saida_extra + [str(tmp)]
             comandos.append(cmd)
-            _rodar_com_progresso(cmd, dur_saida, progresso, cancelar=cancelar)
-        final = _finalizar(tmp, final)
+            _rodar_com_progresso(cmd, dur_saida, prog, cancelar=cancelar)
+        final = _publicar(tmp, final)
+        ok = True
     finally:
         tmp.unlink(missing_ok=True)
+        if not ok:
+            _soltar_reserva(final)
         if logdir:
             shutil.rmtree(logdir, ignore_errors=True)
 
@@ -1380,3 +1589,1575 @@ def exportar(arquivo: Path | str, predefinicao: str | None = None, formato: str 
     if avisos:
         r["avisos"] = avisos
     return r
+
+
+# ---------------------------------------------------------------- imagem (Fase 3)
+# Edições de imagem: cada uma cria uma VERSÃO (vNNN) do documento, como cortar/ajustar_audio.
+# Regras comuns: o vídeo é re-encodado com qualidade alta (codec_video: x264 CRF 18 veryfast, ou VP9 em .webm)
+# para aguentar edições sucessivas; dimensões sempre pares; o ffmpeg já aplica a rotação de metadado na
+# entrada (autorotate), então coordenadas e tamanhos são os do vídeo COMO ELE É EXIBIDO.
+# Edições que não mexem no tempo copiam áudio e legendas sem perda (tags preservadas). Velocidade/congelar
+# mudam a linha do tempo: o áudio é re-encodado com as tags reaplicadas e as legendas são descartadas.
+
+_CONTEINERES_EDICAO = {".mp4", ".mkv", ".mov", ".m4v", ".webm", ".avi", ".ts"}
+
+
+def _midia(entrada: Path) -> dict:
+    """Informações do vídeo que as edições de imagem precisam (erro claro se for só áudio)."""
+    probe = ffprobe(entrada)
+    vids = [s for s in probe["streams"] if s.get("codec_type") == "video"
+            and not s.get("disposition", {}).get("attached_pic")]
+    if not vids:
+        raise ValueError(f"o arquivo não tem vídeo (só áudio?): {entrada.name}")
+    v = vids[0]
+    w, h = _dimensoes(v)
+    # pixels não quadrados (anamórfico, ex. DVD 720x576 com SAR 64:45): normaliza para SAR 1 no início do
+    # grafo, e todas as coordenadas passam a ser as de exibição (1024x576)
+    pre = ""
+    m = re.fullmatch(r"(\d+):(\d+)", str(v.get("sample_aspect_ratio") or ""))
+    if m and int(m.group(1)) and int(m.group(2)) and m.group(1) != m.group(2):
+        sar = int(m.group(1)) / int(m.group(2))
+        w = _par(w * sar)  # (a rotação já foi aplicada em _dimensoes; o SAR vale para a largura armazenada)
+        if _dimensoes(v) != (int(v.get("width") or 0), int(v.get("height") or 0)):
+            w, h = _dimensoes(v)[0], _par(_dimensoes(v)[1] * sar)
+        pre = f"scale={w}:{h}:flags=lanczos,setsar=1"
+    fps = _fps_stream(v) or 30.0
+    taxa = v.get("r_frame_rate") or v.get("avg_frame_rate") or ""
+    if not re.fullmatch(r"\d+/[1-9]\d*", taxa) or _fps_stream({"r_frame_rate": taxa}) > 240:
+        taxa = f"{fps:g}"
+    try:
+        atraso = float(v.get("start_time") or 0) - float(probe.get("format", {}).get("start_time") or 0)
+    except ValueError:
+        atraso = 0.0
+    return {"probe": probe, "v": v, "auds": faixas_audio(probe), "w": w, "h": h, "fps": fps,
+            "atraso_video": max(0.0, atraso), "pre": pre, "dec": _dec_entrada(v),
+            "taxa": taxa, "dur": duracao(probe), "pix_fmt": v.get("pix_fmt") or "",
+            "legendas": any(s.get("codec_type") == "subtitle" for s in probe["streams"]),
+            "anexos": any(s.get("codec_type") == "attachment" for s in probe["streams"])}
+
+
+def _com_pre(info: dict, rotulo: str) -> str:
+    """'[rotulo]' seguido da normalização de SAR (se houver) — início de cadeia de vídeo de uma entrada."""
+    return f"[{rotulo}]{info['pre']}," if info.get("pre") else f"[{rotulo}]"
+
+
+def _aplicar_pre(grafo: list[str], info: dict) -> list[str]:
+    """Insere a normalização de SAR antes do uso de [0:V:0] num grafo já montado."""
+    if not info.get("pre"):
+        return grafo
+    return [f"[0:V:0]{info['pre']}[vsar]"] + [g.replace("[0:V:0]", "[vsar]") for g in grafo]
+
+
+_PAR_FILTRO = "scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1"
+
+
+def _10bits(pix_fmt: str) -> bool:
+    return bool(re.search(r"p1[0-6]", pix_fmt or ""))
+
+
+def _tags_cor(v: dict | None) -> list[str]:
+    """Primárias/transferência/matriz/faixa de cor da origem (HDR continua marcado como HDR)."""
+    if not v:
+        return []
+    out = []
+    for campo, opc in (("color_primaries", "-color_primaries"), ("color_transfer", "-color_trc"),
+                       ("color_space", "-colorspace"), ("color_range", "-color_range")):
+        val = v.get(campo)
+        if val and val not in ("unknown", "reserved", "unspecified"):
+            out += [opc, val]
+    return out
+
+
+def _avisos_profundidade(info: dict, filtros_8bits: str | None = None) -> list[str]:
+    """Avisos para fontes de 10 bits: codec de saída e filtros que só trabalham em 8 bits."""
+    if not _10bits(info.get("pix_fmt", "")):
+        return []
+    av = []
+    if not _tem_encoder("libx265"):
+        av.append("origem de 10 bits re-encodada em H.264 High 10 (sem libx265 no ffmpeg; pouco compatível)")
+    else:
+        av.append("origem de 10 bits: saída em H.265 (HEVC) 10 bits, mantendo as tags de cor")
+    if filtros_8bits:
+        av.append(f"o filtro {filtros_8bits} trabalha em 8 bits: em origem de 10 bits pode surgir 'banding' "
+                  f"(degraus) em degradês suaves")
+    return av
+
+
+def _par(n: float) -> int:
+    return max(2, int(round(n / 2)) * 2)
+
+
+def _args_video_edicao(ext: str, info: dict) -> list[str]:
+    """Codec de vídeo das edições: alta qualidade + pix_fmt compatível + tags de cor da origem.
+    Origem de 10 bits (ex. iPhone HDR em HEVC) ou HEVC → libx265 10/8 bits (H.264 High 10 quase não toca em
+    lugar nenhum); sem libx265, x264 High 10. `info` precisa só de 'pix_fmt' (e opcionalmente 'v')."""
+    v = info.get("v") or {}
+    cor = _tags_cor(v)
+    dez = _10bits(info.get("pix_fmt", ""))
+    if ext == ".webm":
+        return codec_video(ext) + ["-pix_fmt", "yuv420p"] + cor
+    if (dez or v.get("codec_name") == "hevc") and _tem_encoder("libx265"):
+        a = ["-c:v", "libx265", "-crf", "20", "-preset", "faster", "-x265-params", "log-level=error",
+             "-pix_fmt", "yuv420p10le" if dez else "yuv420p"]
+        if ext in (".mp4", ".mov", ".m4v"):
+            a += ["-tag:v", "hvc1"]
+        return a + cor
+    return codec_video(ext) + ["-pix_fmt", "yuv420p10le" if dez else "yuv420p"] + cor
+
+
+def esc_filtro(valor) -> str:
+    """Escapa um valor de opção para o -filter_complex (passado direto ao ffmpeg, sem shell).
+    Dois níveis, como manda a documentação do ffmpeg ("Notes on filtergraph escaping"):
+      1) opção do filtro: entre aspas simples (dentro delas tudo é literal; ' vira '\\'' );
+      2) grafo: \\ ' [ ] , ; ganham barra invertida.
+    Serve para texto do drawtext (com expansion=none, então % é literal), caminhos de arquivo e expressões."""
+    s = str(valor)
+    n1 = "'" + s.replace("'", "'\\''") + "'"
+    return re.sub(r"([\\'\[\],;])", r"\\\1", n1)
+
+
+def _janela_tempo(inicio, fim, est: dict, dur: float) -> tuple[float | None, float | None, str]:
+    """(a, b, ":enable=...") para limitar um filtro a [inicio, fim]; vazio se for o vídeo todo."""
+    if inicio is None and fim is None:
+        return None, None, ""
+    a = max(0.0, parse_tempo(inicio, est)) if inicio is not None else 0.0
+    b = parse_tempo(fim, est) if fim is not None else dur
+    if b - a <= 0.001:
+        raise ValueError(f"intervalo vazio: {fmt_tempo(a)} → {fmt_tempo(b)}")
+    return a, b, ":enable=" + esc_filtro(f"between(t,{a:.3f},{b:.3f})")
+
+
+def _desc_janela(a, b) -> str:
+    return f" em {fmt_tempo(a)}→{fmt_tempo(b)}" if a is not None else ""
+
+
+def _saida_edicao(doc: Documento) -> Path:
+    ext = doc.atual().suffix.lower()
+    return doc.proxima_saida(ext if ext in _CONTEINERES_EDICAO else ".mp4")
+
+
+def _rodar_versao(doc: Documento, saida: Path, cmds: list[list[str]], durs: list[float], descricao: str,
+                  progresso=None, extra: dict | None = None) -> dict:
+    """Roda os comandos (com progresso dividido entre eles), registra a versão e devolve o dict da versão.
+    Se algo falhar, apaga a saída parcial."""
+    try:
+        n = len(cmds)
+        for i, (c, d) in enumerate(zip(cmds, durs)):
+            _rodar_com_progresso(c, d, progresso, i / n, 1 / n)
+        if not saida.exists() or saida.stat().st_size == 0:
+            raise ErroFFmpeg(f"o ffmpeg terminou mas não gerou {saida.name}")
+    except BaseException:
+        saida.unlink(missing_ok=True)
+        raise
+    v = doc.registrar(saida, descricao, cmds)
+    if extra:
+        v = {**v, **extra}
+    return v
+
+
+def _editar_quadros(doc: Documento, montar, descricao_fn, progresso=None, entradas_extra=None) -> dict:
+    """Edição que só mexe nos quadros (não na linha do tempo).
+    montar(info) → (partes do grafo de [0:V:0] até [vo], descrição); áudio/legendas copiados sem perda."""
+    entrada = doc.atual()
+    info = _midia(entrada)
+    grafo, desc = montar(info)
+    grafo = _aplicar_pre(grafo, info)
+    if info["w"] % 2 or info["h"] % 2:  # origem com dimensão ímpar: yuv420p/x264 exigem pares
+        grafo[-1] = grafo[-1][: grafo[-1].rindex("[vo]")] + "[vimpar]"
+        grafo.append(f"[vimpar]{_PAR_FILTRO}[vo]")
+    saida = _saida_edicao(doc)
+    cmd = FFMPEG + info["dec"] + ["-i", str(entrada)] + list(entradas_extra or [])
+    cmd += ["-filter_complex", ";".join(grafo), "-map", "[vo]"]
+    cmd += _mapas_copia(info, entrada, saida, "0")
+    cmd += _args_video_edicao(saida.suffix, info) + _tags_faixa(info["v"], "s:v:0")
+    cmd += ["-map_metadata", "0"] + _faststart(saida) + [str(saida)]
+    extra = {"avisos": _avisos_profundidade(info, info.get("filtros_8bits"))}
+    return _rodar_versao(doc, saida, [cmd], [info["dur"]], descricao_fn(desc) if descricao_fn else desc,
+                         progresso, extra if extra["avisos"] else None)
+
+
+def _faststart(saida: Path) -> list[str]:
+    return ["-movflags", "+faststart"] if saida.suffix.lower() in (".mp4", ".mov", ".m4v") else []
+
+
+def _mapas_copia(info: dict, entrada: Path, saida: Path, idx: str, audio: bool = True) -> list[str]:
+    """-map/-c para copiar sem perda, da entrada `idx`, o áudio (se audio=True), as legendas e os anexos do MKV
+    (fontes de legendas ASS). Se o contêiner mudou, o áudio é re-encodado e legendas/anexos ficam de fora."""
+    mesmo = saida.suffix.lower() == entrada.suffix.lower()
+    out = []
+    if audio:
+        out += ["-map", f"{idx}:a?"] + (["-c:a", "copy"] if mesmo else codec_audio(saida.suffix))
+    if mesmo:
+        out += ["-map", f"{idx}:s?", "-c:s", "copy"]
+        if info.get("anexos") and saida.suffix.lower() in (".mkv", ".mka"):
+            out += ["-map", f"{idx}:t?", "-c:t", "copy"]
+    return out
+
+
+# ---- geometria
+_PROPORCOES_NOMEADAS = {"vertical": "9:16", "stories": "9:16", "reels": "9:16", "tiktok": "9:16",
+                        "shorts": "9:16", "horizontal": "16:9", "widescreen": "16:9", "youtube": "16:9",
+                        "quadrado": "1:1", "quadrada": "1:1", "retrato": "4:5", "feed": "4:5",
+                        "paisagem": "16:9", "cinema": "21:9", "classico": "4:3", "clássico": "4:3"}
+
+
+def parse_proporcao(valor) -> tuple[float, str]:
+    """'9:16', '9/16', '16x9', '1.777', 'vertical', 'quadrado', 'retrato' (4:5)... → (largura/altura, rótulo)."""
+    s = str(valor).strip().lower()
+    s = _PROPORCOES_NOMEADAS.get(s, s)
+    m = re.fullmatch(r"(\d+(?:[.,]\d+)?)\s*[:/x×]\s*(\d+(?:[.,]\d+)?)", s)
+    try:
+        if m:
+            a, b = float(m.group(1).replace(",", ".")), float(m.group(2).replace(",", "."))
+            r, rot = a / b, f"{m.group(1)}:{m.group(2)}"
+        else:
+            r = float(s.replace(",", "."))
+            rot = f"{r:g}:1"
+    except (ValueError, ZeroDivisionError):
+        raise ValueError(f"proporção inválida: {valor} (use '9:16', '1:1', '4:5', '16:9'...)") from None
+    if not 0.1 <= r <= 10:
+        raise ValueError(f"proporção fora do razoável: {valor}")
+    return r, rot
+
+
+_POSICOES = {"centro": 0.5, "meio": 0.5, "centro_horizontal": 0.5, "esquerda": 0.0, "esq": 0.0, "topo": 0.0,
+             "cima": 0.0, "acima": 0.0, "superior": 0.0, "direita": 1.0, "dir": 1.0, "base": 1.0, "baixo": 1.0,
+             "inferior": 1.0, "embaixo": 1.0}
+
+
+def _frac_posicao(posicao) -> float:
+    if posicao is None:
+        return 0.5
+    if isinstance(posicao, (int, float)):
+        return min(1.0, max(0.0, float(posicao)))
+    s = str(posicao).strip().lower()
+    if s in _POSICOES:
+        return _POSICOES[s]
+    try:
+        return min(1.0, max(0.0, float(s.replace(",", "."))))
+    except ValueError:
+        raise ValueError("posicao: 'centro', 'esquerda'/'topo', 'direita'/'base' ou número de 0 a 1") from None
+
+
+def _retangulo(ret, w: int, h: int, nome: str = "retangulo") -> tuple[int, int, int, int]:
+    """[x, y, largura, altura] em pixels (do vídeo exibido) ou frações 0–1 (todos os valores ≤ 1) →
+    inteiros pares dentro do quadro."""
+    if isinstance(ret, dict):
+        ret = [ret.get("x", 0), ret.get("y", 0), ret.get("largura", ret.get("w")), ret.get("altura", ret.get("h"))]
+    try:
+        x, y, rw, rh = (float(str(v).replace(",", ".")) for v in ret)
+    except (TypeError, ValueError):
+        raise ValueError(f"{nome}: use [x, y, largura, altura] em pixels ou frações 0–1") from None
+    if all(0 <= v <= 1 for v in (x, y, rw, rh)):
+        x, y, rw, rh = x * w, y * h, rw * w, rh * h
+    if rw <= 0 or rh <= 0:
+        raise ValueError(f"{nome}: largura e altura precisam ser positivas")
+    x = int(min(max(0.0, x), w - 2)) // 2 * 2
+    y = int(min(max(0.0, y), h - 2)) // 2 * 2
+    rw = max(2, int(min(rw, w - x)) // 2 * 2)
+    rh = max(2, int(min(rh, h - y)) // 2 * 2)
+    return x, y, rw, rh
+
+
+def _recorte_proporcao(r: float, w: int, h: int, posicao) -> tuple[int, int, int, int]:
+    """Maior retângulo com proporção r dentro de w×h, posicionado por `posicao` (0 = esquerda/topo)."""
+    f = _frac_posicao(posicao)
+    if w / h > r:
+        rh = h // 2 * 2
+        rw = min(w // 2 * 2, _par(rh * r))
+        x = int((w - rw) * f) // 2 * 2
+        return x, 0, rw, rh
+    rw = w // 2 * 2
+    rh = min(h // 2 * 2, _par(rw / r))
+    y = int((h - rh) * f) // 2 * 2
+    return 0, y, rw, rh
+
+
+def transformar_imagem(doc: Documento, recorte=None, proporcao=None, posicao=None, girar=None,
+                       modo_giro: str = "expandir", cor: str = "black", espelhar: str | None = None,
+                       largura: int | None = None, altura: int | None = None, escala: float | None = None,
+                       progresso=None) -> dict:
+    """Recorta, gira, espelha e/ou redimensiona, NESTA ORDEM, numa única versão.
+    recorte=[x, y, largura, altura] (px ou frações 0–1) OU proporcao='9:16' (+ posicao) recorta;
+    girar=graus no sentido horário (90/180/270 sem perda de área; outros ângulos: modo_giro
+    'expandir' (tela cresce, cantos com `cor`), 'manter' (mesmo tamanho, cantos com `cor`) ou
+    'recorte' (amplia para não sobrar canto)); espelhar='horizontal' | 'vertical' | 'ambos';
+    largura/altura (uma só = mantém a proporção; as duas = cabe dentro) ou escala (0.5 = metade)."""
+    import math
+
+    if recorte is not None and proporcao is not None:
+        raise ValueError("use recorte OU proporcao, não os dois")
+    if escala is not None and (largura or altura):
+        raise ValueError("use escala OU largura/altura")
+
+    def montar(info):
+        w, h = info["w"], info["h"]
+        f: list[str] = []
+        desc: list[str] = []
+        if recorte is not None or proporcao is not None:
+            if recorte is not None:
+                x, y, cw, ch = _retangulo(recorte, w, h, "recorte")
+                desc.append(f"recortou {cw}x{ch} em ({x},{y})")
+            else:
+                r, rot = parse_proporcao(proporcao)
+                x, y, cw, ch = _recorte_proporcao(r, w, h, posicao)
+                desc.append(f"recortou para {rot} ({cw}x{ch})")
+            if (cw, ch) != (w, h):
+                f.append(f"crop={cw}:{ch}:{x}:{y}")
+            w, h = cw, ch
+        if girar is not None and float(girar) % 360:
+            g = float(girar) % 360
+            if abs(g - 90) < 1e-6:
+                f.append("transpose=clock")
+                w, h = h, w
+            elif abs(g - 270) < 1e-6:
+                f.append("transpose=cclock")
+                w, h = h, w
+            elif abs(g - 180) < 1e-6:
+                f.append("hflip,vflip")
+            else:
+                th = math.radians(g)
+                c, s = abs(math.cos(th)), abs(math.sin(th))
+                modo = (modo_giro or "expandir").lower()
+                cor_f = esc_filtro(cor)
+                if modo == "expandir":
+                    ow, oh = _par(math.ceil(w * c + h * s)), _par(math.ceil(w * s + h * c))
+                    f.append(f"rotate={th:.6f}:ow={ow}:oh={oh}:c={cor_f}")
+                    w, h = ow, oh
+                elif modo == "manter":
+                    f.append(f"rotate={th:.6f}:c={cor_f}")
+                elif modo == "recorte":
+                    k = c + max(w / h, h / w) * s
+                    f.append(f"scale={_par(math.ceil(w * k))}:{_par(math.ceil(h * k))}:flags=bicubic,"
+                             f"rotate={th:.6f}:ow={w}:oh={h}")
+                else:
+                    raise ValueError("modo_giro: 'expandir', 'manter' ou 'recorte'")
+            desc.append(f"girou {float(girar):g}°" + ("" if g in (90, 180, 270) else f" ({modo_giro})"))
+        if espelhar:
+            e = str(espelhar).lower()
+            if e in ("horizontal", "h", "lados", "esquerda_direita"):
+                f.append("hflip")
+            elif e in ("vertical", "v", "cima_baixo", "de_cabeca_para_baixo"):
+                f.append("vflip")
+            elif e in ("ambos", "os_dois", "hv"):
+                f.append("hflip,vflip")
+            else:
+                raise ValueError("espelhar: 'horizontal', 'vertical' ou 'ambos'")
+            desc.append(f"espelhou ({e})")
+        if escala is not None:
+            if not 0.05 <= float(escala) <= 8:
+                raise ValueError("escala entre 0.05 e 8 (0.5 = metade)")
+            nw, nh = _par(w * float(escala)), _par(h * float(escala))
+            f.append(f"scale={nw}:{nh}:flags=lanczos")
+            w, h = nw, nh
+            desc.append(f"redimensionou para {nw}x{nh}")
+        elif largura or altura:
+            if largura and altura:
+                k = min(int(largura) / w, int(altura) / h)
+            else:
+                k = int(largura) / w if largura else int(altura) / h
+            nw, nh = _par(w * k), _par(h * k)
+            f.append(f"scale={nw}:{nh}:flags=lanczos")
+            w, h = nw, nh
+            desc.append(f"redimensionou para {nw}x{nh}")
+        if not f:
+            raise ValueError("nada a fazer: passe recorte, proporcao, girar, espelhar, largura/altura ou escala")
+        if w % 2 or h % 2:
+            f.append(_PAR_FILTRO)
+        return [f"[0:V:0]{','.join(f)},setsar=1[vo]"], "; ".join(desc)
+
+    return _editar_quadros(doc, montar, None, progresso)
+
+
+def mudar_proporcao(doc: Documento, proporcao, modo: str = "desfocado", cor: str = "black",
+                    largura: int | None = None, altura: int | None = None, posicao=None,
+                    progresso=None) -> dict:
+    """Muda a proporção da tela (16:9 ↔ 9:16 ↔ 1:1 ↔ 4:5...).
+    modo 'desfocado': o vídeo inteiro por cima do próprio vídeo ampliado e desfocado (igual ao Instagram
+    da exportação); 'barras': barras de `cor`; 'recorte': corta as sobras (posicao escolhe o lado).
+    Tamanho: largura/altura se passados; senão o lado maior do vídeo vira o lado maior da nova tela
+    (1280x720 → 720x1280); no 'recorte' sem tamanho, os pixels originais são mantidos (sem ampliar)."""
+    r, rot = parse_proporcao(proporcao)
+    modo = (modo or "desfocado").lower()
+    if modo not in ("desfocado", "barras", "recorte"):
+        raise ValueError("modo: 'desfocado', 'barras' ou 'recorte'")
+
+    def montar(info):
+        w, h = info["w"], info["h"]
+        if abs(w / h - r) < 0.01:
+            raise ValueError(f"o vídeo já está em {rot} ({w}x{h})")
+        if largura and altura:
+            L, A = _par(int(largura)), _par(int(altura))
+        elif largura:
+            L, A = _par(int(largura)), _par(int(largura) / r)
+        elif altura:
+            L, A = _par(int(altura) * r), _par(int(altura))
+        elif modo == "recorte":
+            x, y, cw, ch = _recorte_proporcao(r, w, h, posicao)
+            return [f"[0:V:0]crop={cw}:{ch}:{x}:{y},setsar=1[vo]"], f"proporção {rot} por recorte ({cw}x{ch})"
+        else:
+            lado = max(w, h)
+            L, A = (_par(lado), _par(lado / r)) if r >= 1 else (_par(lado * r), _par(lado))
+        if modo == "recorte" and posicao is not None and _frac_posicao(posicao) != 0.5:
+            x, y, cw, ch = _recorte_proporcao(r, w, h, posicao)
+            g = [f"[0:V:0]crop={cw}:{ch}:{x}:{y},scale={L}:{A}:flags=lanczos,setsar=1[vo]"]
+        else:
+            p = {"tipo": "video", "tela": (L, A)}
+            g = _cadeia_video(p, w, h, info["fps"], None, None, None, modo, "0:V:0", "vo", cor=esc_filtro(cor))
+        return g, f"proporção {rot} ({modo}, {L}x{A})"
+
+    return _editar_quadros(doc, montar, None, progresso)
+
+
+# ---- cor
+def ajustar_cor(doc: Documento, brilho: float | None = None, contraste: float | None = None,
+                saturacao: float | None = None, gama: float | None = None, temperatura: float | None = None,
+                inicio=None, fim=None, estado: dict | None = None, progresso=None) -> dict:
+    """Ajustes de cor (filtro eq + colortemperature), opcionalmente só em [inicio, fim].
+    brilho: -1..1 (0 = igual; 0.05–0.15 já é visível); contraste: multiplicador (1 = igual; 1.2 = +20%);
+    saturacao: multiplicador (1 = igual; 0 = preto e branco; 1.3 = mais viva); gama: 1 = igual (>1 clareia
+    os tons médios); temperatura: kelvin (6500 = neutro; menor = mais quente/alaranjado, maior = mais frio/azulado)."""
+    est = dict(estado or {})
+
+    def montar(info):
+        est.setdefault("duracao", info["dur"])
+        a, b, en = _janela_tempo(inicio, fim, est, info["dur"])
+        f, desc = [], []
+        eq = []
+        if brilho:
+            if not -1 <= float(brilho) <= 1:
+                raise ValueError("brilho entre -1 e 1 (0 = sem mudança)")
+            eq.append(f"brightness={float(brilho):g}")
+            desc.append(f"brilho {float(brilho):+g}")
+        if contraste is not None and float(contraste) != 1:
+            if not 0 <= float(contraste) <= 3:
+                raise ValueError("contraste entre 0 e 3 (1 = sem mudança)")
+            eq.append(f"contrast={float(contraste):g}")
+            desc.append(f"contraste ×{float(contraste):g}")
+        if saturacao is not None and float(saturacao) != 1:
+            if not 0 <= float(saturacao) <= 3:
+                raise ValueError("saturacao entre 0 e 3 (1 = sem mudança, 0 = preto e branco)")
+            eq.append(f"saturation={float(saturacao):g}")
+            desc.append("preto e branco" if float(saturacao) == 0 else f"saturação ×{float(saturacao):g}")
+        if gama is not None and float(gama) != 1:
+            if not 0.1 <= float(gama) <= 10:
+                raise ValueError("gama entre 0.1 e 10 (1 = sem mudança)")
+            eq.append(f"gamma={float(gama):g}")
+            desc.append(f"gama {float(gama):g}")
+        if eq:
+            f.append("eq=" + ":".join(eq) + en)
+        if temperatura is not None and float(temperatura) != 6500:
+            k = float(temperatura)
+            if not 1000 <= k <= 40000:
+                raise ValueError("temperatura em kelvin, de 1000 a 40000 (6500 = neutro)")
+            if "colortemperature" in binarios._lista_ffmpeg("filters") or not binarios._lista_ffmpeg("filters"):
+                f.append(f"colortemperature=temperature={k:g}{en}")
+            else:  # aproximação: ganho nos canais vermelho/azul
+                d = max(-0.3, min(0.3, (6500 - k) / 6500 * 0.4))
+                f.append(f"colorbalance=rm={d:.3f}:bm={-d:.3f}{en}")
+            desc.append(f"temperatura {k:g} K")
+        if not f:
+            raise ValueError("nenhum ajuste pedido (brilho, contraste, saturacao, gama ou temperatura)")
+        return [f"[0:V:0]{','.join(f)}[vo]"], "cor: " + ", ".join(desc) + _desc_janela(a, b)
+
+    return _editar_quadros(doc, montar, None, progresso)
+
+
+# ---- estabilização
+def estabilizar(doc: Documento, suavizacao: int = 15, bordas: str = "zoom", tremor: int = 5,
+                metodo: str | None = None, progresso=None) -> dict:
+    """Estabiliza a câmera. Com vidstab (2 passes: vidstabdetect analisa o movimento, vidstabtransform
+    corrige); sem ele, o filtro `deshake` (1 passe, mais simples).
+    suavizacao: nº de quadros usados para suavizar o movimento (maior = câmera mais "parada"; 15 ≈ 0,5 s a 30 fps);
+    tremor: 1–10, quanto o vídeo treme (vidstab, padrão 5); bordas: 'zoom' (amplia o mínimo para esconder
+    as bordas), 'preto' (bordas pretas) ou 'manter' (preenche com o quadro anterior)."""
+    filtros = binarios._lista_ffmpeg("filters")
+    tem_vidstab = not filtros or {"vidstabdetect", "vidstabtransform"} <= filtros
+    metodo = (metodo or ("vidstab" if tem_vidstab else "deshake")).lower()
+    if metodo == "vidstab" and not tem_vidstab:
+        raise ValueError("o ffmpeg encontrado não tem vidstab; use metodo='deshake'")
+    if bordas not in ("zoom", "preto", "manter"):
+        raise ValueError("bordas: 'zoom', 'preto' ou 'manter'")
+    suavizacao = max(1, min(int(suavizacao), 200))
+    tremor = max(1, min(int(tremor), 10))
+    entrada = doc.atual()
+    info = _midia(entrada)
+    saida = _saida_edicao(doc)
+    trocou_ext = saida.suffix.lower() != entrada.suffix.lower()
+
+    def final(grafo: str) -> list[str]:
+        c = FFMPEG + ["-i", str(entrada), "-filter_complex", grafo, "-map", "[vo]", "-map", "0:a?"]
+        if not trocou_ext:
+            c += ["-map", "0:s?", "-c:s", "copy"]
+        c += _args_video_edicao(saida.suffix, info) + _tags_faixa(info["v"], "s:v:0")
+        c += codec_audio(saida.suffix) if trocou_ext else ["-c:a", "copy"]
+        return c + ["-map_metadata", "0", str(saida)]
+
+    par = "" if info["w"] % 2 == 0 and info["h"] % 2 == 0 else "," + _PAR_FILTRO
+    if metodo == "deshake":
+        borda = {"zoom": "edge=clamp", "preto": "edge=blank", "manter": "edge=original"}[bordas]
+        cmd = final(f"[0:V:0]deshake={borda}{par}[vo]")
+        desc = "estabilizou (deshake)"
+        return _rodar_versao(doc, saida, [cmd], [info["dur"]], desc, progresso)
+    tmp = Path(tempfile.mkdtemp(prefix="vidstab-", dir=doc.pasta))
+    try:
+        trf = esc_filtro(tmp / "movimento.trf")
+        cmd1 = FFMPEG + ["-i", str(entrada), "-filter_complex",
+                         f"[0:V:0]vidstabdetect=shakiness={tremor}:accuracy=15:result={trf}",
+                         "-an", "-f", "null", os.devnull]
+        borda = {"zoom": "optzoom=1:crop=black", "preto": "optzoom=0:crop=black",
+                 "manter": "optzoom=0:crop=keep"}[bordas]
+        cmd2 = final(f"[0:V:0]vidstabtransform=input={trf}:smoothing={suavizacao}:{borda}:interpol=bicubic,"
+                     f"unsharp=5:5:0.8:3:3:0.4{par}[vo]")
+        desc = f"estabilizou (vidstab, suavização {suavizacao}, bordas {bordas})"
+        return _rodar_versao(doc, saida, [cmd1, cmd2], [info["dur"], info["dur"]], desc, progresso)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ---- linha do tempo: velocidade e congelar
+def _cadeia_atempo(f: float) -> str:
+    """atempo encadeado: cada estágio entre 0.5 e 2 (melhor qualidade que um único fator grande)."""
+    estagios = []
+    while f > 2.0 + 1e-9:
+        estagios.append(2.0)
+        f /= 2.0
+    while f < 0.5 - 1e-9:
+        estagios.append(0.5)
+        f /= 0.5
+    estagios.append(f)
+    return ",".join(f"atempo={e:.6g}" for e in estagios)
+
+
+def _layout(s: dict) -> str:
+    lay = s.get("channel_layout")
+    if lay and "(" not in lay:
+        return lay
+    n = int(s.get("channels") or 2)
+    return {1: "mono", 2: "stereo"}.get(n, f"{n}c")
+
+
+def _editar_linha_tempo(doc: Documento, segmentos: list[dict], descricao: str, progresso=None,
+                        copiar_audio: bool = False, info: dict | None = None) -> dict:
+    """Reconstrói o vídeo a partir de segmentos, cada um uma entrada própria (`-ss a -t d -i`, como no
+    corte preciso; nada de split, que guardaria quadros na memória).
+    segmento: {"a", "b" (None = até o fim), "fator" (velocidade; 1 = normal), "manter_tom", "silenciar"}
+              ou {"congelar": t, "d": segundos}.
+    copiar_audio=True: o áudio original é copiado inteiro (a duração total não pode mudar)."""
+    entrada = doc.atual()
+    info = info or _midia(entrada)
+    auds = [] if copiar_audio else info["auds"]
+    saida = _saida_edicao(doc)
+    cmd = FFMPEG[:]
+    grafo, conc = [], ""
+    dur_saida = 0.0
+    for i, sg in enumerate(segmentos):
+        if "congelar" in sg:
+            t = sg["congelar"]
+            # mesmo truque da foto de quadro: meio quadro antes pega exatamente o quadro exibido em t,
+            # descontando o atraso do vídeo em relação ao início do arquivo (ex.: MKV com vídeo em 0,021 s)
+            o = info["atraso_video"]
+            n = max(0, int((t - o) * info["fps"] + 1e-6))
+            ss = max(0.0, o + (n - 0.5) / info["fps"])
+            cmd += ["-ss", f"{ss:.6f}", "-t", f"{2 / info['fps']:.6f}", "-i", str(entrada)]
+            d = sg["d"]
+            grafo.append(f"[{i}:V:0]trim=end_frame=1,setpts=PTS-STARTPTS,"
+                         f"tpad=stop_mode=clone:stop_duration={d + 1:.3f},trim=duration={d:.6f}[v{i}]")
+            conc += f"[v{i}]"
+            for k, s in enumerate(auds):
+                sr = int(s.get("sample_rate") or 48000)
+                grafo.append(f"anullsrc=r={sr}:cl={_layout(s)},atrim=duration={d:.6f}[a{k}_{i}]")
+                conc += f"[a{k}_{i}]"
+            dur_saida += d
+            continue
+        a, b = sg["a"], sg.get("b")
+        cmd += ["-ss", f"{a:.6f}"] + (["-t", f"{b - a:.6f}"] if b is not None else []) + ["-i", str(entrada)]
+        fator = float(sg.get("fator") or 1.0)
+        dur_saida += ((b if b is not None else info["dur"]) - a) / fator
+        vpts = "PTS-STARTPTS" if fator == 1 else f"(PTS-STARTPTS)/{fator:.6g}"
+        grafo.append(f"[{i}:V:0]setpts={vpts}[v{i}]")
+        conc += f"[v{i}]"
+        for k, s in enumerate(auds):
+            ff = ["asetpts=PTS-STARTPTS"]
+            if fator != 1:
+                if sg.get("manter_tom", True):
+                    ff.append(_cadeia_atempo(fator))
+                else:
+                    sr = int(s.get("sample_rate") or 48000)
+                    ff.append(f"asetrate={sr * fator:.0f},aresample={sr}")
+            if sg.get("silenciar"):
+                ff.append("volume=0")
+            grafo.append(f"[{i}:a:{k}]{','.join(ff)}[a{k}_{i}]")
+            conc += f"[a{k}_{i}]"
+    n = len(segmentos)
+    sai = "[vc]" + "".join(f"[ao{k}]" for k in range(len(auds)))
+    grafo.append(f"{conc}concat=n={n}:v=1:a={len(auds)}{sai}")
+    par = "" if info["w"] % 2 == 0 and info["h"] % 2 == 0 else "," + _PAR_FILTRO
+    grafo.append(f"[vc]fps={info['taxa']}{par}[vo]")  # volta a ter fps constante
+    if copiar_audio:
+        cmd += ["-i", str(entrada)]
+    cmd += ["-filter_complex", ";".join(grafo), "-map", "[vo]"]
+    cmd += _args_video_edicao(saida.suffix, info) + _tags_faixa(info["v"], "s:v:0")
+    if copiar_audio:
+        cmd += ["-map", f"{n}:a?", "-c:a", "copy"]
+    else:
+        for k, s in enumerate(auds):
+            cmd += ["-map", f"[ao{k}]"] + _tags_faixa(s, f"s:a:{k}")
+        if auds:
+            cmd += codec_audio(saida.suffix)
+    cmd += ["-map_metadata", "0", "-map_chapters", "-1"]
+    if saida.suffix in (".mp4", ".mov", ".m4v"):
+        cmd += ["-movflags", "+faststart"]
+    cmd.append(str(saida))
+    extra = {}
+    if info["legendas"]:
+        extra["avisos"] = ["as legendas embutidas foram removidas (a linha do tempo mudou)"]
+    return _rodar_versao(doc, saida, [cmd], [dur_saida], descricao, progresso, extra)
+
+
+def velocidade_trecho(doc: Documento, fator: float, inicio=None, fim=None, manter_tom: bool = True,
+                      silenciar: bool = False, estado: dict | None = None, progresso=None) -> dict:
+    """Muda a velocidade só de [inicio, fim] (padrão: o vídeo todo). fator 0.5 = câmera lenta (metade),
+    2 = o dobro; de 0.1 a 10. Áudio: atempo encadeado mantém o tom (manter_tom=False muda o tom junto,
+    como fita); silenciar=True deixa o trecho alterado mudo. Quadros: duplicados/descartados para manter
+    o fps original (sem interpolação)."""
+    fator = float(fator)
+    if not 0.1 <= fator <= 10:
+        raise ValueError("fator entre 0.1 e 10 (0.5 = câmera lenta pela metade, 2 = dobro da velocidade)")
+    if abs(fator - 1) < 1e-6:
+        raise ValueError("fator 1 não muda nada")
+    info = _midia(doc.atual())
+    est = dict(estado or {})
+    est.setdefault("duracao", info["dur"])
+    a = max(0.0, parse_tempo(inicio, est)) if inicio is not None else 0.0
+    b = min(info["dur"], parse_tempo(fim, est)) if fim is not None else info["dur"]
+    if b - a < 0.05:
+        raise ValueError(f"trecho curto demais: {fmt_tempo(a)} → {fmt_tempo(b)}")
+    segs = []
+    if a > 0.01:
+        segs.append({"a": 0.0, "b": a})
+    segs.append({"a": a, "b": b if info["dur"] - b > 0.01 else None, "fator": fator,
+                 "manter_tom": manter_tom, "silenciar": silenciar})
+    if info["dur"] - b > 0.01:
+        segs.append({"a": b, "b": None})
+    nome = "câmera lenta" if fator < 1 else "acelerou"
+    desc = f"{nome} ×{fator:g} em {fmt_tempo(a)}→{fmt_tempo(b)}"
+    if silenciar:
+        desc += " (mudo)"
+    elif not manter_tom:
+        desc += " (tom alterado)"
+    v = _editar_linha_tempo(doc, segs, desc, progresso, info=info)
+    v["trecho_novo"] = [fmt_tempo(a), fmt_tempo(a + (b - a) / fator)]
+    return v
+
+
+def congelar_quadro(doc: Documento, tempo, duracao_s: float, modo: str = "inserir",
+                    estado: dict | None = None, progresso=None) -> dict:
+    """Congela o quadro exibido em `tempo` por `duracao_s` segundos.
+    modo 'inserir': o vídeo pausa nesse quadro e depois continua (fica mais longo); o áudio fica em
+    silêncio durante a pausa. modo 'substituir': o quadro parado cobre os próximos `duracao_s` segundos
+    e o áudio continua normal por baixo (duração igual; áudio copiado sem perda)."""
+    d = float(duracao_s)
+    if not 0.04 <= d <= 600:
+        raise ValueError("duracao_s entre 0.04 e 600 segundos")
+    modo = (modo or "inserir").lower()
+    if modo not in ("inserir", "substituir"):
+        raise ValueError("modo: 'inserir' ou 'substituir'")
+    info = _midia(doc.atual())
+    est = dict(estado or {})
+    est.setdefault("duracao", info["dur"])
+    t = min(max(0.0, parse_tempo(tempo, est)), max(0.0, info["dur"] - 1 / info["fps"]))
+    segs: list[dict] = []
+    if t > 0.01:
+        segs.append({"a": 0.0, "b": t})
+    segs.append({"congelar": t, "d": d})
+    if modo == "inserir":
+        if info["dur"] - t > 0.01:
+            segs.append({"a": t, "b": None})
+        desc = f"congelou o quadro de {fmt_tempo(t)} por {d:g} s (inserido, áudio mudo)"
+        return _editar_linha_tempo(doc, segs, desc, progresso, info=info)
+    fim_c = t + d
+    if fim_c >= info["dur"] - 0.01:
+        d = segs[-1]["d"] = info["dur"] - t
+    else:
+        segs.append({"a": fim_c, "b": None})
+    desc = f"congelou o quadro de {fmt_tempo(t)} por {d:g} s (por cima, áudio mantido)"
+    return _editar_linha_tempo(doc, segs, desc, progresso, copiar_audio=True, info=info)
+
+
+# ---- texto, marca d'água, borrar
+_FONTE_PADRAO: str | None = None
+
+
+@functools.cache
+def _tem_opcao_filtro(filtro: str, opcao: str) -> bool:
+    try:
+        r = subprocess.run([FFMPEG[0], "-hide_banner", "-h", f"filter={filtro}"], capture_output=True,
+                           text=True, timeout=15)
+        return re.search(rf"^\s+{re.escape(opcao)}\s", r.stdout, re.M) is not None
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def fonte_arquivo(nome: str | None = None) -> str | None:
+    """Arquivo da fonte (fc-match); padrão DejaVu Sans. Aceita caminho direto de .ttf/.otf."""
+    global _FONTE_PADRAO
+    if nome and Path(nome).expanduser().is_file():
+        return str(Path(nome).expanduser())
+    if not nome and _FONTE_PADRAO:
+        return _FONTE_PADRAO
+    fc = ferramenta("fc-match")
+    achado = None
+    if fc:
+        try:
+            r = subprocess.run([fc, "-f", "%{file}", nome or "DejaVu Sans"], capture_output=True, text=True,
+                               timeout=10)
+            if r.returncode == 0 and r.stdout.strip() and Path(r.stdout.strip()).is_file():
+                achado = r.stdout.strip()
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    if not achado and not nome:
+        for c in ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/TTF/DejaVuSans.ttf",
+                  "/usr/share/fonts/dejavu/DejaVuSans.ttf"):
+            if Path(c).is_file():
+                achado = c
+                break
+    if not nome:
+        _FONTE_PADRAO = achado
+    return achado
+
+
+_ANCORAS = {
+    "centro": ("c", "c"), "meio": ("c", "c"), "topo": ("c", "t"), "cima": ("c", "t"), "base": ("c", "b"),
+    "baixo": ("c", "b"), "rodape": ("c", "b"), "rodapé": ("c", "b"),
+    "esquerda": ("l", "c"), "direita": ("r", "c"),
+    "sup_esq": ("l", "t"), "superior_esquerdo": ("l", "t"), "topo_esquerda": ("l", "t"),
+    "sup_dir": ("r", "t"), "superior_direito": ("r", "t"), "topo_direita": ("r", "t"),
+    "inf_esq": ("l", "b"), "inferior_esquerdo": ("l", "b"), "base_esquerda": ("l", "b"),
+    "inf_dir": ("r", "b"), "inferior_direito": ("r", "b"), "base_direita": ("r", "b"),
+}
+
+
+def _posicao_xy(posicao, w: int, h: int, ow: str, oh: str, margem: int) -> tuple[str, str]:
+    """Expressões x, y para colocar um objeto de tamanho (ow, oh) no quadro w×h.
+    posicao: nome (topo, base, centro, sup_esq, inf_dir...) ou [x, y] em pixels ou frações 0–1."""
+    if isinstance(posicao, (list, tuple)) or (isinstance(posicao, str) and re.fullmatch(r"\s*[\d.]+\s*[,;]\s*[\d.]+\s*", posicao)):
+        px, py = (float(v) for v in (posicao if isinstance(posicao, (list, tuple)) else re.split(r"[,;]", posicao)))
+        if px <= 1 and py <= 1:
+            px, py = px * w, py * h
+        return str(int(px)), str(int(py))
+    p = str(posicao or "base").strip().lower().replace(" ", "_").replace("-", "_")
+    if p not in _ANCORAS:
+        raise ValueError(f"posicao desconhecida: {posicao}. Use {', '.join(sorted(_ANCORAS))} ou [x, y]")
+    ax, ay = _ANCORAS[p]
+    x = {"l": f"{margem}", "c": f"(W-{ow})/2", "r": f"W-{ow}-{margem}"}[ax]
+    y = {"t": f"{margem}", "c": f"(H-{oh})/2", "b": f"H-{oh}-{margem}"}[ay]
+    return x, y
+
+
+def sobrepor_texto(doc: Documento, texto: str, posicao="base", tamanho=None, cor: str = "white",
+                   caixa: bool = False, cor_caixa: str = "black@0.55", contorno: int | None = None,
+                   cor_contorno: str = "black", fonte: str | None = None, inicio=None, fim=None,
+                   estado: dict | None = None, progresso=None) -> dict:
+    """Escreve `texto` por cima do vídeo (drawtext). Quebras de linha com \\n viram linhas.
+    tamanho: pixels (ex. 48) ou fração da altura (ex. 0.06; padrão 1/15 da altura).
+    cor/cor_caixa/cor_contorno: nome ou #RRGGBB, com @opacidade (ex. 'black@0.5').
+    caixa=True: fundo atrás do texto; contorno: espessura do contorno em px (padrão 2 sem caixa, 0 com caixa)."""
+    if not texto or not str(texto).strip():
+        raise ValueError("texto vazio")
+    texto = str(texto).replace("\r\n", "\n")
+    est = dict(estado or {})
+    arq_fonte = fonte_arquivo(fonte)
+    if fonte and not arq_fonte:
+        raise ValueError(f"fonte não encontrada: {fonte}")
+
+    def montar(info):
+        w, h = info["w"], info["h"]
+        est.setdefault("duracao", info["dur"])
+        a, b, en = _janela_tempo(inicio, fim, est, info["dur"])
+        if tamanho is None:
+            px = max(10, round(h / 15))
+            # cabe na largura: DejaVu Sans tem ~0,58 em de largura média por caractere
+            maior = max(len(linha) for linha in texto.split("\n"))
+            if maior * 0.58 * px > 0.92 * w:
+                px = max(10, int(0.92 * w / (0.58 * maior)))
+        else:
+            t = float(tamanho)
+            px = max(6, round(t * h)) if t < 1 else int(t)
+        margem = max(8, round(h * 0.04))
+        x, y = _posicao_xy(posicao, w, h, "text_w", "text_h", margem)
+        borda = (0 if caixa else max(1, round(px / 24))) if contorno is None else int(contorno)
+        op = [f"text={esc_filtro(texto)}", "expansion=none", f"fontsize={px}", f"fontcolor={esc_filtro(cor)}",
+              f"x={esc_filtro(x)}", f"y={esc_filtro(y)}", "line_spacing=" + str(round(px * 0.2))]
+        if arq_fonte:
+            op.insert(1, f"fontfile={esc_filtro(arq_fonte)}")
+        if "\n" in texto and _tem_opcao_filtro("drawtext", "text_align"):  # ffmpeg 6.1+
+            ax = "c"
+            if isinstance(posicao, str) and posicao.strip().lower().replace(" ", "_") in _ANCORAS:
+                ax = _ANCORAS[posicao.strip().lower().replace(" ", "_")][0]
+            op.append("text_align=" + {"l": "left", "c": "center", "r": "right"}[ax])
+        if caixa:
+            op += ["box=1", f"boxcolor={esc_filtro(cor_caixa)}", f"boxborderw={max(4, round(px * 0.3))}"]
+        if borda:
+            op += [f"borderw={borda}", f"bordercolor={esc_filtro(cor_contorno)}"]
+        g = "drawtext=" + ":".join(op) + en
+        resumo = texto if len(texto) <= 40 else texto[:37] + "..."
+        return [f"[0:V:0]{g}[vo]"], f"texto “{resumo}” ({posicao}){_desc_janela(a, b)}"
+
+    return _editar_quadros(doc, montar, None, progresso)
+
+
+def marca_dagua(doc: Documento, imagem: str | Path, posicao="inf_dir", escala: float = 0.15,
+                opacidade: float = 1.0, margem: float = 0.03, inicio=None, fim=None,
+                estado: dict | None = None, progresso=None) -> dict:
+    """Sobrepõe uma imagem (PNG com transparência, JPG...) ao vídeo.
+    escala: largura da imagem como fração da largura do vídeo (0.15 = 15%) ou pixels (> 1);
+    opacidade 0–1; margem: fração da altura do vídeo; posicao como em sobrepor_texto."""
+    img = Path(str(imagem)).expanduser().resolve()
+    if not img.is_file():
+        raise FileNotFoundError(f"imagem não encontrada: {img}")
+    if not 0 < float(opacidade) <= 1:
+        raise ValueError("opacidade entre 0 e 1")
+    est = dict(estado or {})
+
+    def montar(info):
+        w, h = info["w"], info["h"]
+        est.setdefault("duracao", info["dur"])
+        a, b, en = _janela_tempo(inicio, fim, est, info["dur"])
+        e = float(escala)
+        lw = _par(e * w) if e <= 1 else _par(e)
+        if not 2 <= lw <= 4 * w:
+            raise ValueError("escala inválida")
+        m = max(0, round(float(margem) * h)) if float(margem) < 1 else int(margem)
+        x, y = _posicao_xy(posicao, w, h, "w", "h", m)
+        f = [f"[1:v]format=rgba,scale={lw}:-2:flags=lanczos"]
+        if float(opacidade) < 1:
+            f[0] += f",colorchannelmixer=aa={float(opacidade):g}"
+        f[0] += "[marca]"
+        f.append(f"[0:V:0][marca]overlay=x={esc_filtro(x)}:y={esc_filtro(y)}:eof_action=repeat:format=auto"
+                 f"{en}[vo]")
+        return f, f"marca d'água {img.name} ({posicao}, {lw}px, opacidade {float(opacidade):g}){_desc_janela(a, b)}"
+
+    # imagem de um quadro só: o overlay a repete até o fim (eof_action=repeat)
+    return _editar_quadros(doc, montar, None, progresso, entradas_extra=["-i", str(img)])
+
+
+def _interp_expr(pontos: list[tuple[float, float]]) -> str:
+    """Expressão do ffmpeg (variável t) que interpola linearmente os pontos (tempo, valor);
+    antes do primeiro e depois do último, fica parado."""
+    pontos = sorted(pontos)
+    if len(pontos) == 1:
+        return f"{pontos[0][1]:.2f}"
+    expr = f"{pontos[-1][1]:.2f}"
+    for (t0, v0), (t1, v1) in reversed(list(zip(pontos, pontos[1:]))):
+        if t1 - t0 < 1e-6:
+            continue
+        seg = f"{v0:.2f}+({v1 - v0:.2f})*(t-{t0:.3f})/{t1 - t0:.3f}"
+        expr = f"if(lt(t,{t1:.3f}),{seg},{expr})"
+    return f"if(lt(t,{pontos[0][0]:.3f}),{pontos[0][1]:.2f},{expr})"
+
+
+def borrar_area(doc: Documento, retangulos=None, trajetoria=None, modo: str = "borrar",
+                intensidade: float | None = None, inicio=None, fim=None, estado: dict | None = None,
+                progresso=None) -> dict:
+    """Borra ou pixela áreas retangulares (placa, rosto) em [inicio, fim] (padrão: o vídeo todo).
+    retangulos: [x, y, largura, altura] ou lista deles (px ou frações 0–1), parados.
+    trajetoria: área que se move: [{"tempo": t, "retangulo": [x, y, l, a]}, ...] (≥ 2 pontos);
+    o centro é interpolado linearmente entre os pontos e o tamanho é o maior dos pontos.
+    Antes do 1º/depois do último ponto a área fica parada (o intervalo padrão é do 1º ao último ponto).
+    modo 'borrar' (gblur) ou 'pixelar' (blocos); intensidade: sigma do desfoque / tamanho do bloco em px
+    (padrão proporcional à área)."""
+    modo = (modo or "borrar").lower()
+    if modo not in ("borrar", "pixelar"):
+        raise ValueError("modo: 'borrar' ou 'pixelar'")
+    if (retangulos is None) == (trajetoria is None):
+        raise ValueError("passe retangulos (área parada) OU trajetoria (área que se move)")
+    est = dict(estado or {})
+
+    def efeito(cw, ch):
+        if modo == "pixelar":
+            bl = int(intensidade) if intensidade else max(6, min(cw, ch) // 8)
+            bl = max(2, min(bl, cw, ch))
+            return f"pixelize=width={bl}:height={bl}", bl
+        sg = float(intensidade) if intensidade else max(6.0, min(cw, ch) / 6)
+        return f"gblur=sigma={sg:g}:steps=3", sg
+
+    def montar(info):
+        w, h = info["w"], info["h"]
+        est.setdefault("duracao", info["dur"])
+        ini, fi = inicio, fim
+        areas = []  # (crop_x_expr, crop_y_expr, cw, ch)
+        if trajetoria is not None:
+            if not isinstance(trajetoria, list) or len(trajetoria) < 2:
+                raise ValueError("trajetoria precisa de pelo menos 2 pontos {tempo, retangulo}")
+            pts = []
+            for p in trajetoria:
+                t = parse_tempo(p.get("tempo"), est)
+                x, y, rw, rh = _retangulo(p.get("retangulo"), w, h, "trajetoria.retangulo")
+                pts.append((t, x + rw / 2, y + rh / 2, rw, rh))
+            cw = max(p[3] for p in pts) // 2 * 2
+            ch = max(p[4] for p in pts) // 2 * 2
+            ex = _interp_expr([(t, cx - cw / 2) for t, cx, _, _, _ in pts])
+            ey = _interp_expr([(t, cy - ch / 2) for t, _, cy, _, _ in pts])
+            # limites: a área inteira dentro do quadro
+            ex = f"max(0,min({w - cw},{ex}))"
+            ey = f"max(0,min({h - ch},{ey}))"
+            areas.append((ex, ey, cw, ch))
+            if ini is None and fim is None:
+                ini, fi = min(p[0] for p in pts), max(p[0] for p in pts)
+            desc_area = f"área móvel {cw}x{ch} ({len(pts)} pontos)"
+        else:
+            lista = retangulos
+            if lista and not isinstance(lista[0], (list, tuple, dict)):
+                lista = [lista]
+            for r in lista:
+                x, y, rw, rh = _retangulo(r, w, h, "retangulos")
+                areas.append((str(x), str(y), rw, rh))
+            desc_area = ", ".join(f"{a[2]}x{a[3]} em ({a[0]},{a[1]})" for a in areas)
+        a, b, en = _janela_tempo(ini, fi, est, info["dur"])
+        partes = []
+        n = len(areas)
+        rotulos = "".join(f"[s{i}]" for i in range(n))
+        partes.append(f"[0:V:0]split={n + 1}[base]{rotulos}")
+        atual = "base"
+        valor = None
+        for i, (ex, ey, cw, ch) in enumerate(areas):
+            ef, valor = efeito(cw, ch)
+            partes.append(f"[s{i}]crop=w={cw}:h={ch}:x={esc_filtro(ex)}:y={esc_filtro(ey)}:exact=1,{ef}[b{i}]")
+            prox = "vo" if i == n - 1 else f"m{i}"
+            partes.append(f"[{atual}][b{i}]overlay=x={esc_filtro(ex)}:y={esc_filtro(ey)}{en}[{prox}]")
+            atual = prox
+        nome = "pixelou" if modo == "pixelar" else "borrou"
+        return partes, f"{nome} {desc_area}{_desc_janela(a, b)}"
+
+    return _editar_quadros(doc, montar, None, progresso)
+
+
+# ---------------------------------------------------------------- áudio (Fase 4)
+# Edições de áudio práticas, só com o ffmpeg: cada uma cria uma VERSÃO (vNNN), como as demais.
+# Faixas: índice 0 = A1. O vídeo e as faixas não tocadas são copiados sem perda (exceto o fade de vídeo,
+# que re-encoda a imagem); a faixa editada é re-encodada com codec_audio(ext) e as tags reaplicadas.
+# Medições (piso de ruído, voz/silêncio) vêm de janelas de 50 ms do astats (`niveis_audio`).
+
+MODELOS_DIR = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / "ai-editor" / "modelos"
+_INTENSIDADES = {"leve": 10.0, "media": 20.0, "média": 20.0, "medio": 20.0, "forte": 32.0}
+_LOTE_CORTES = 8  # trechos por comando no corte preciso (cada trecho = uma entrada/decodificador aberto;
+# 12 entradas 720p com threads automáticas ≈ 800 MB, 8 com -threads 2 ≈ 350 MB)
+
+
+def _faixa_valida(faixa, n: int) -> int:
+    """faixa 1..n (A1 = 1) → índice 0..n-1, com erro claro."""
+    if n == 0:
+        raise ValueError("o arquivo não tem áudio")
+    f = int(faixa or 1)
+    if not 1 <= f <= n:
+        raise ValueError(f"faixa A{f} não existe (há {n} faixa(s) de áudio)")
+    return f - 1
+
+
+def _info_audio(entrada: Path) -> dict:
+    """Como `_midia`, mas aceita arquivo só de áudio (v = None)."""
+    probe = ffprobe(entrada)
+    vids = [s for s in probe["streams"] if s.get("codec_type") == "video"
+            and not s.get("disposition", {}).get("attached_pic")]
+    v = vids[0] if vids else None
+    return {"probe": probe, "v": v, "auds": faixas_audio(probe), "dur": duracao(probe),
+            "fps": (_fps_stream(v) or 30.0) if v else None,
+            "legendas": any(s.get("codec_type") == "subtitle" for s in probe["streams"])}
+
+
+def niveis_audio(arquivo: Path | str, faixa: int = 0, inicio: float | None = None, fim: float | None = None,
+                 janela: float = 0.05) -> list[tuple[float, float]]:
+    """Nível RMS (dBFS) em janelas de `janela` s da faixa (índice 0 = A1): [(t, db), ...].
+    Silêncio digital vira -120 dB. Tempos absolutos no arquivo."""
+    probe = ffprobe(arquivo)
+    auds = faixas_audio(probe)
+    k = _faixa_valida(faixa + 1, len(auds))
+    sr = int(auds[k].get("sample_rate") or 48000)
+    n = max(64, int(round(sr * janela)))
+    cmd = [FFMPEG[0], "-hide_banner", "-nostdin", "-v", "error"]
+    if inicio:
+        cmd += ["-ss", f"{inicio:.3f}"]
+    cmd += ["-i", str(arquivo)]
+    if fim is not None:
+        cmd += ["-t", f"{fim - (inicio or 0):.3f}"]
+    cmd += ["-map", f"0:a:{k}", "-af",
+            f"aformat=channel_layouts=mono,asetnsamples=n={n}:p=0,"
+            "astats=metadata=1:reset=1:measure_perchannel=none:measure_overall=RMS_level,"
+            "ametadata=print:key=lavfi.astats.Overall.RMS_level:file=-", "-f", "null", "-"]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        raise ErroFFmpeg(f"medição de nível falhou: {r.stderr[-2000:]}")
+    off, t, res = inicio or 0.0, None, []
+    for linha in r.stdout.splitlines():
+        m = re.search(r"pts_time:\s*(-?[\d.]+)", linha)
+        if m:
+            t = float(m.group(1)) + off
+            continue
+        if linha.startswith("lavfi.astats.Overall.RMS_level=") and t is not None:
+            v = linha.split("=", 1)[1].strip()
+            try:
+                db = float(v)
+            except ValueError:
+                db = -120.0
+            res.append((t, max(-120.0, db) if db == db else -120.0))
+    return res
+
+
+def _percentil(vals: list[float], p: float) -> float:
+    s = sorted(vals)
+    if not s:
+        return -120.0
+    return s[min(len(s) - 1, max(0, int(round(p / 100 * (len(s) - 1)))))]
+
+
+def _media_db(vals: list[float]) -> float:
+    import math
+    if not vals:
+        return -120.0
+    pot = sum(10 ** (v / 10) for v in vals) / len(vals)
+    return max(-120.0, 10 * math.log10(pot)) if pot > 0 else -120.0
+
+
+def medir_ruido(niveis: list[tuple[float, float]], janela: float = 0.05) -> dict:
+    """Estima o piso de ruído a partir dos níveis em janelas.
+    Procura o trecho quieto mais longo (≥ 0,3 s, nível ≤ p10 + 3 dB) quando há contraste entre fala e
+    pausa (p80 − p10 ≥ 10 dB): é o ruído "puro", usado também como amostra do perfil do afftdn.
+    Sem pausas (som contínuo), o piso é estimado pelo p10 (origem 'estimado')."""
+    dbs = [d for _, d in niveis]
+    p10, p80 = _percentil(dbs, 10), _percentil(dbs, 80)
+    res = {"p10_db": round(p10, 1), "p80_db": round(p80, 1), "amostra": None}
+    if p80 - p10 >= 10:
+        lim = p10 + 3
+        melhor, atual = None, None
+        for t, d in niveis:
+            if d <= lim:
+                atual = [atual[0], t + janela] if atual else [t, t + janela]
+                if not melhor or atual[1] - atual[0] > melhor[1] - melhor[0]:
+                    melhor = list(atual)
+            else:
+                atual = None
+        if melhor and melhor[1] - melhor[0] >= 0.3:
+            a, b = melhor
+            if b - a > 0.5:  # tira as bordas (transição fala → pausa)
+                a, b = a + 0.1, b - 0.1
+            if b - a > 2.0:
+                c = (a + b) / 2
+                a, b = c - 1.0, c + 1.0
+            ruido = _media_db([d for t, d in niveis if a <= t < b])
+            res.update({"ruido_db": round(ruido, 1), "origem": "medido", "amostra": (a, b)})
+            return res
+    res.update({"ruido_db": round(p10, 1), "origem": "estimado"})
+    return res
+
+
+def _intensidade_db(intensidade) -> float:
+    if intensidade is None:
+        return _INTENSIDADES["media"]
+    if isinstance(intensidade, str):
+        k = intensidade.strip().lower()
+        if k in _INTENSIDADES:
+            return _INTENSIDADES[k]
+        try:
+            intensidade = float(k.replace(",", ".").removesuffix("db").strip())
+        except ValueError:
+            raise ValueError("intensidade: 'leve', 'media', 'forte' ou dB de redução (3 a 60)") from None
+    x = float(intensidade)
+    if not 3 <= x <= 60:
+        raise ValueError("intensidade em dB de redução entre 3 e 60 (leve=10, media=20, forte=32)")
+    return x
+
+
+def modelo_rnnoise() -> Path | None:
+    """Primeiro modelo .rnnn em ~/.local/share/ai-editor/modelos/rnnoise (nada é baixado)."""
+    pasta = MODELOS_DIR / "rnnoise"
+    ms = sorted(pasta.glob("*.rnnn")) if pasta.is_dir() else []
+    return ms[0] if ms else None
+
+
+def _editar_audio(doc: Documento, grafo: list[str], saidas: dict[int, str], descricao: str,
+                  progresso=None, entradas_extra: list[str] | None = None, novas: list[tuple[str, dict]] = (),
+                  video: str | None = None, info: dict | None = None, extra: dict | None = None,
+                  dur_saida: float | None = None) -> dict:
+    """Monta e roda uma edição de áudio.
+    grafo: partes do -filter_complex; saidas: {índice da faixa: rótulo} (faixas substituídas);
+    novas: [(rótulo, {"title":..., "language":...})] faixas acrescentadas no fim;
+    video: rótulo do vídeo re-encodado (None = vídeo copiado sem perda)."""
+    entrada = doc.atual()
+    info = info or _info_audio(entrada)
+    auds = info["auds"]
+    ext = entrada.suffix.lower()
+    if novas and ext in (".wav", ".mp3", ".flac", ".ogg", ".opus", ".m4a", ".aac") and not info["v"]:
+        ext = ".mka"  # contêiner de áudio com uma faixa só: a nova faixa pede um que aceite várias
+        extra = {**(extra or {}), "avisos": (extra or {}).get("avisos", []) +
+                 ["o arquivo agora é .mka (o formato original só guarda uma faixa de áudio)"]}
+    saida = doc.proxima_saida(ext)
+    trocou_ext = saida.suffix.lower() != entrada.suffix.lower()
+    cmd = FFMPEG + (_dec_entrada(info["v"]) if video else []) + ["-i", str(entrada)] + list(entradas_extra or [])
+    cmd += ["-filter_complex", ";".join(grafo)]
+    cmd += ["-map", f"[{video}]"] if video else ["-map", "0:V?"]
+    for i in range(len(auds)):
+        cmd += ["-map", f"[{saidas[i]}]" if i in saidas else f"0:a:{i}"]
+    for rot, _ in novas:
+        cmd += ["-map", f"[{rot}]"]
+    if not trocou_ext:
+        cmd += ["-map", "0:s?"]
+    cmd += ["-c", "copy"]
+    if video:
+        cmd += _args_video_edicao(saida.suffix, {"pix_fmt": info["v"].get("pix_fmt") or ""})
+        cmd += _tags_faixa(info["v"], "s:v:0")
+    for i, s in enumerate(auds):
+        if i in saidas:
+            cmd += codec_audio(saida.suffix, i) + _tags_faixa(s, f"s:a:{i}")
+    for j, (_, tags) in enumerate(novas):
+        k = len(auds) + j
+        cmd += codec_audio(saida.suffix, k)
+        for chave, valor in tags.items():
+            if valor:
+                cmd += [f"-metadata:s:a:{k}", f"{chave}={valor}"]
+    cmd += ["-map_metadata", "0"]
+    if saida.suffix in (".mp4", ".mov", ".m4v"):
+        cmd += ["-movflags", "+faststart"]
+    cmd.append(str(saida))
+    return _rodar_versao(doc, saida, [cmd], [dur_saida or info["dur"]], descricao, progresso, extra)
+
+
+# ---- redução de ruído
+def reduzir_ruido(doc: Documento, metodo: str = "afftdn", intensidade="media", faixa: int = 1,
+                  inicio=None, fim=None, piso_ruido_db: float | None = None, estado: dict | None = None,
+                  progresso=None) -> dict:
+    """Reduz ruído de fundo constante (chiado, ventilador, zumbido largo) de uma faixa.
+    metodo 'afftdn' (padrão; FFT): mede o ruído sozinho — acha a pausa mais quieta da faixa, usa-a como
+      amostra do perfil de ruído (o trecho é colocado antes do áudio só para o filtro aprender e depois é
+      retirado) e ajusta o piso (nf) a partir do nível medido. Sem pausas, estima pelo nível mais baixo.
+    metodo 'anlmdn' (médias não locais): mais suave, sem perfil; ~10× mais lento.
+    metodo 'rnnoise' (arnndn, rede neural para voz): precisa de um modelo .rnnn em
+      ~/.local/share/ai-editor/modelos/rnnoise/ (não é baixado automaticamente).
+    intensidade: 'leve' (10 dB), 'media' (20 dB), 'forte' (32 dB) ou dB de redução (3–60).
+    inicio/fim: aplica só nesse trecho (o resto fica igual). piso_ruido_db: força o nível do ruído (dBFS RMS)."""
+    metodo = (metodo or "afftdn").lower()
+    if metodo not in ("afftdn", "anlmdn", "rnnoise"):
+        raise ValueError("metodo: 'afftdn' (padrão), 'anlmdn' ou 'rnnoise'")
+    nr = _intensidade_db(intensidade)
+    entrada = doc.atual()
+    info = _info_audio(entrada)
+    k = _faixa_valida(faixa, len(info["auds"]))
+    est = dict(estado or {})
+    est.setdefault("duracao", info["dur"])
+    a, b, _ = _janela_tempo(inicio, fim, est, info["dur"])
+    s = info["auds"][k]
+    sr = int(s.get("sample_rate") or 48000)
+    extra_in: list[str] = []
+    detalhes: dict = {"metodo": metodo, "faixa": f"A{k + 1}"}
+    avisos: list[str] = []
+    desloc = 0.0  # o afftdn com amostra põe o ruído antes do áudio: os tempos do enable andam junto
+
+    def enable(d):
+        if a is None:
+            return ""
+        return ":enable=" + esc_filtro(f"between(t,{a + d:.3f},{b + d:.3f})")
+
+    if metodo == "afftdn":
+        niv = niveis_audio(entrada, k, a, b)
+        med = medir_ruido(niv)
+        if piso_ruido_db is not None:
+            med.update({"ruido_db": float(piso_ruido_db), "origem": "informado", "amostra": None})
+        ruido = med["ruido_db"]
+        # o nf do afftdn fica ~18 dB acima do RMS de banda larga do ruído (calibrado com ruído rosa:
+        # nesse ponto a redução passa a ser a pedida em nr, sem tocar no sinal acima do ruído)
+        nf = min(-20.0, max(-80.0, ruido + 18))
+        filtro = f"afftdn@dn=nr={nr:g}:nf={nf:.1f}"
+        detalhes.update({"ruido_db": ruido, "origem_medicao": med["origem"], "reducao_db": nr,
+                         "nf": round(nf, 1)})
+        if ruido <= -100:
+            avisos.append("a pausa mais quieta é silêncio digital: não há ruído de fundo para reduzir")
+        amostra = med.get("amostra")
+        if amostra and ruido > -100:
+            ra, rb = amostra
+            desloc = rb - ra
+            extra_in = ["-ss", f"{ra:.3f}", "-t", f"{desloc:.3f}", "-i", str(entrada)]
+            cmds = esc_filtro(f"0 afftdn@dn sn start;{desloc:.3f} afftdn@dn sn stop")
+            cadeia = (f"[1:a:{k}][0:a:{k}]concat=n=2:v=0:a=1,asendcmd=c={cmds},{filtro}{enable(desloc)},"
+                      f"atrim=start={desloc:.6f},asetpts=PTS-STARTPTS[ar]")
+            detalhes["perfil_ruido"] = f"amostrado em {fmt_tempo(ra)}→{fmt_tempo(rb)}"
+        else:
+            cadeia = f"[0:a:{k}]{filtro}{enable(0)}[ar]"
+        desc = f"reduziu ruído A{k + 1} (afftdn, {nr:g} dB; ruído {ruido:.0f} dB {med['origem']})"
+    elif metodo == "anlmdn":
+        forca = min(1000.0, 10 ** (nr / 10 - 1))  # leve 1, media 10, forte ~160
+        cadeia = f"[0:a:{k}]anlmdn=s={forca:.4g}{enable(0)}[ar]"
+        detalhes["forca"] = round(forca, 3)
+        desc = f"reduziu ruído A{k + 1} (anlmdn, força {forca:.3g})"
+    else:
+        modelo = modelo_rnnoise()
+        if not modelo:
+            raise ValueError("o método 'rnnoise' precisa de um modelo .rnnn em "
+                             f"{MODELOS_DIR / 'rnnoise'}/ (ex.: os modelos do projeto "
+                             "GregorR/rnnoise-models). Nada é baixado automaticamente; "
+                             "use metodo='afftdn' (padrão) ou coloque o modelo nessa pasta.")
+        mix = min(1.0, max(0.2, nr / 25))
+        cadeia = (f"[0:a:{k}]aresample=48000,arnndn=m={esc_filtro(modelo)}:mix={mix:.2f}{enable(0)},"
+                  f"aresample={sr}[ar]")
+        detalhes.update({"modelo": modelo.name, "mix": round(mix, 2)})
+        desc = f"reduziu ruído A{k + 1} (rnnoise {modelo.stem}, mix {mix:.2f})"
+    desc += _desc_janela(a, b)
+    extra = {"detalhes": detalhes}
+    if avisos:
+        extra["avisos"] = avisos
+    return _editar_audio(doc, [cadeia], {k: "ar"}, desc, progresso, extra_in, info=info, extra=extra)
+
+
+# ---- silêncios
+def detectar_silencios(arquivo: Path | str, faixa: int = 0, limiar_db: float = -40, duracao_min: float = 0.5,
+                       inicio: float | None = None, fim: float | None = None) -> list[tuple[float, float]]:
+    """silencedetect na faixa (índice 0 = A1): [(de, até)] em segundos absolutos."""
+    dur = duracao(ffprobe(arquivo))
+    cmd = [FFMPEG[0], "-hide_banner", "-nostdin"]
+    if inicio:
+        cmd += ["-ss", f"{inicio:.3f}"]
+    cmd += ["-i", str(arquivo)]
+    if fim is not None:
+        cmd += ["-t", f"{fim - (inicio or 0):.3f}"]
+    cmd += ["-map", f"0:a:{faixa}", "-af", f"silencedetect=n={limiar_db:g}dB:d={duracao_min:g}",
+            "-f", "null", "-"]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        raise ErroFFmpeg(r.stderr[-3000:])
+    off = inicio or 0.0
+    fim_real = fim if fim is not None else dur
+    res, ini = [], None
+    for linha in r.stderr.splitlines():
+        m = re.search(r"silence_start:\s*(-?[\d.]+)", linha)
+        if m:
+            ini = max(0.0, float(m.group(1))) + off
+        m = re.search(r"silence_end:\s*(-?[\d.]+)", linha)
+        if m and ini is not None:
+            res.append((ini, min(fim_real, float(m.group(1)) + off)))
+            ini = None
+    if ini is not None:
+        res.append((ini, fim_real))
+    return res
+
+
+def _cortar_preciso(doc: Documento, manter: list[tuple[float, float]], descricao: str, progresso=None,
+                    extra: dict | None = None) -> dict:
+    """Mantém os trechos com o corte preciso (`_cmd_preciso`). Com muitos trechos, corta em lotes de
+    `_LOTE_CORTES` (cada trecho abre um decodificador; todos de uma vez estourariam a memória) para
+    partes .mkv (vídeo final + áudio FLAC sem perda) e junta com o demuxer concat (vídeo copiado,
+    áudio codificado uma vez só)."""
+    entrada = doc.atual()
+    probe = ffprobe(entrada)
+    saida = doc.proxima_saida()
+    total = sum(b - a for a, b in manter)
+    if len(manter) <= _LOTE_CORTES:
+        cmd = _poucas_threads(_cmd_preciso(entrada, probe, manter, saida))
+        return _rodar_versao(doc, saida, [cmd], [total], descricao, progresso, extra)
+    auds = faixas_audio(probe)
+    ca_mkv = codec_audio(".mkv")
+    with tempfile.TemporaryDirectory(dir=doc.pasta, prefix="lotes-") as tmp:
+        cmds, durs, partes = [], [], []
+        for i in range(0, len(manter), _LOTE_CORTES):
+            lote = manter[i:i + _LOTE_CORTES]
+            p = Path(tmp) / f"parte{i // _LOTE_CORTES:03d}.mkv"
+            c = _poucas_threads(_cmd_preciso(entrada, probe, lote, p))
+            for j in range(len(c) - len(ca_mkv) + 1):  # áudio intermediário sem perda
+                if c[j:j + len(ca_mkv)] == ca_mkv:
+                    c[j:j + len(ca_mkv)] = ["-c:a", "flac"]
+                    break
+            cmds.append(c)
+            durs.append(sum(b - a for a, b in lote))
+            partes.append(p)
+        lista = Path(tmp) / "lista.txt"
+        lista.write_text("".join(f"file {esc_concat(p)}\n" for p in partes))
+        final = FFMPEG + ["-f", "concat", "-safe", "0", "-i", str(lista), "-i", str(entrada),
+                          "-map", "0:v?", "-map", "0:a?", "-c:v", "copy"]
+        for k, s in enumerate(auds):
+            final += _tags_faixa(s, f"s:a:{k}")
+        if auds:
+            final += codec_audio(saida.suffix)
+        final += ["-map_metadata", "1", "-map_chapters", "-1"]
+        if saida.suffix in (".mp4", ".mov", ".m4v"):
+            final += ["-movflags", "+faststart"]
+        final.append(str(saida))
+        # pesos de progresso: cortes ≈ 90%, junção ≈ 10%
+        n = len(cmds)
+        try:
+            for i, (c, d) in enumerate(zip(cmds, durs)):
+                _rodar_com_progresso(c, d, progresso, 0.9 * i / n, 0.9 / n)
+            _rodar_com_progresso(final, total, progresso, 0.9, 0.1)
+            if not saida.exists() or saida.stat().st_size == 0:
+                raise ErroFFmpeg(f"o ffmpeg terminou mas não gerou {saida.name}")
+        except BaseException:
+            saida.unlink(missing_ok=True)
+            raise
+    v = doc.registrar(saida, descricao, cmds + [final])
+    return {**v, **(extra or {})}
+
+
+def _poucas_threads(cmd: list[str]) -> list[str]:
+    """Limita cada decodificador de entrada (`-ss` só aparece nas entradas do _cmd_preciso) a 2 threads."""
+    out = []
+    for x in cmd:
+        if x == "-ss":
+            out += ["-threads", "2"]
+        out.append(x)
+    return out
+
+
+def esc_concat(p: Path) -> str:
+    """Caminho entre aspas simples para a lista do demuxer concat."""
+    return "'" + str(p).replace("'", "'\\''") + "'"
+
+
+def remover_silencios(doc: Documento, modo: str = "cortar", limiar_db: float | None = None,
+                      duracao_min_s: float = 0.6, margem_s: float = 0.15, faixa: int = 1, inicio=None, fim=None,
+                      estado: dict | None = None, progresso=None) -> dict:
+    """Acha silêncios na faixa (silencedetect) e os corta do vídeo e de todas as faixas juntos.
+    limiar_db: abaixo disso é silêncio (None = automático: entre o piso de ruído e o nível da fala).
+    duracao_min_s: só pausas pelo menos desse tamanho. margem_s: deixa esse tanto de pausa antes e depois
+    da fala (respiração, para não ficar "picotado"). modo 'analisar' só lista (não cria versão)."""
+    modo = (modo or "cortar").lower()
+    if modo not in ("cortar", "analisar"):
+        raise ValueError("modo: 'cortar' ou 'analisar'")
+    if not 0.1 <= float(duracao_min_s) <= 60:
+        raise ValueError("duracao_min_s entre 0.1 e 60")
+    if not 0 <= float(margem_s) <= 2:
+        raise ValueError("margem_s entre 0 e 2")
+    entrada = doc.atual()
+    info = _info_audio(entrada)
+    k = _faixa_valida(faixa, len(info["auds"]))
+    dur = info["dur"]
+    est = dict(estado or {})
+    est.setdefault("duracao", dur)
+    a, b, _ = _janela_tempo(inicio, fim, est, dur)
+    origem_limiar = "informado"
+    if limiar_db is None:
+        niv = niveis_audio(entrada, k, a, b)
+        dbs = [d for _, d in niv]
+        p10, p80 = max(-90.0, _percentil(dbs, 10)), _percentil(dbs, 80)
+        limiar_db = min(-20.0, max(-60.0, p10 + max(6.0, 0.3 * (p80 - p10))))
+        origem_limiar = f"automático (piso {p10:.0f} dB, fala {p80:.0f} dB)"
+    sil = detectar_silencios(entrada, k, limiar_db, duracao_min_s, a, b)
+    ini_janela = a or 0.0
+    fim_janela = b if b is not None else dur
+    remover = []
+    for s0, s1 in sil:
+        r0 = s0 if s0 <= ini_janela + 0.001 and ini_janela == 0 else s0 + margem_s
+        r1 = s1 if s1 >= dur - 0.001 else s1 - margem_s
+        r0, r1 = max(ini_janela, r0), min(fim_janela, r1)
+        if r1 - r0 >= 0.1:
+            remover.append((r0, r1))
+    if info["v"]:  # cortes no limite dos quadros: vídeo e áudio somam a mesma duração
+        fps = info["fps"]
+        # 0,4 ms antes do quadro: o _cmd_preciso escreve -ss com 3 casas; 8,16667 viraria 8,167 e o quadro
+        # desse instante ficaria de fora (vídeo 1 quadro adiantado em relação ao áudio em cada trecho)
+        remover = [(max(0.0, round(x * fps) / fps - 0.0004), round(y * fps) / fps - 0.0004) for x, y in remover]
+        remover = [(x, min(y, dur)) for x, y in remover if y - x >= 0.05]
+    total = sum(y - x for x, y in remover)
+    res = {"faixa": f"A{k + 1}", "limiar_db": round(limiar_db, 1), "limiar": origem_limiar,
+           "duracao_min_s": duracao_min_s, "margem_s": margem_s,
+           "silencios": [{"de": fmt_tempo(x), "ate": fmt_tempo(y), "duracao_s": round(y - x, 3)} for x, y in sil],
+           "a_remover": [[fmt_tempo(x), fmt_tempo(y)] for x, y in remover],
+           "total_removido_s": round(total, 3), "duracao_atual": fmt_tempo(dur),
+           "duracao_depois": fmt_tempo(dur - total)}
+    if modo == "analisar":
+        res["dica"] = ("para ver na régua: `marcar` com os tempos de a_remover; para cortar: modo='cortar' "
+                       "(ou `remover_trechos` com a lista ajustada)")
+        return res
+    if not remover:
+        raise ValueError(f"nenhum silêncio ≥ {duracao_min_s:g} s abaixo de {limiar_db:.0f} dB "
+                         "(tente limiar_db mais alto, ex. -30, ou duracao_min_s menor)")
+    manter = complemento(remover, dur)
+    manter = [(x, y) for x, y in manter if y - x >= 0.02]
+    desc = (f"removeu {len(remover)} silêncio(s) ({total:.1f} s; A{k + 1} < {limiar_db:.0f} dB, "
+            f"≥ {duracao_min_s:g} s, margem {margem_s:g} s)")
+    detalhes = {k2: res[k2] for k2 in ("limiar_db", "limiar", "total_removido_s", "a_remover")}
+    v = _cortar_preciso(doc, manter, desc, progresso, {"detalhes": detalhes})
+    if info["legendas"]:
+        v["avisos"] = ["as legendas embutidas foram removidas (a linha do tempo mudou)"]
+    return v
+
+
+# ---- fades
+def fade_audio(doc: Documento, entrada_s: float | None = None, saida_s: float | None = None,
+               faixas: list[int] | None = None, video: bool = False, cor: str = "black",
+               curva: str = "tri", progresso=None) -> dict:
+    """Fade in no começo e/ou fade out no fim do áudio (faixas: [1], [1,2]...; padrão: todas).
+    video=True escurece a imagem junto (para `cor`, padrão preto; re-encoda o vídeo).
+    curva: 'tri' (linear), 'qsin' (suave), 'exp', 'log'... (nomes do afade)."""
+    if not entrada_s and not saida_s:
+        raise ValueError("passe entrada_s (fade in) e/ou saida_s (fade out), em segundos")
+    entrada = doc.atual()
+    info = _info_audio(entrada)
+    dur = info["dur"]
+    for d in (entrada_s, saida_s):
+        if d and not 0.01 <= float(d) <= dur:
+            raise ValueError(f"duração do fade entre 0.01 e {dur:.1f} s")
+    curvas = {"tri", "qsin", "hsin", "esin", "log", "ipar", "qua", "cub", "squ", "cbr", "par", "exp",
+              "iqsin", "ihsin", "dese", "desi", "losi", "sinc", "isinc", "nofade"}
+    if curva not in curvas:
+        raise ValueError(f"curva: uma de {', '.join(sorted(curvas))}")
+    n = len(info["auds"])
+    idx = [_faixa_valida(f, n) for f in faixas] if faixas else list(range(n))
+    if video and not info["v"]:
+        raise ValueError("o arquivo não tem vídeo (video=True só vale para vídeos)")
+    if not idx and not video:
+        raise ValueError("o arquivo não tem áudio; use video=True para escurecer a imagem")
+    grafo, saidas = [], {}
+    for i in idx:
+        ff = []
+        if entrada_s:
+            ff.append(f"afade=t=in:st=0:d={float(entrada_s):.3f}:curve={curva}")
+        if saida_s:
+            st = max(0.0, dur - float(saida_s))
+            ff.append(f"afade=t=out:st={st:.3f}:d={float(saida_s):.3f}:curve={curva}")
+        grafo.append(f"[0:a:{i}]{','.join(ff)}[af{i}]")
+        saidas[i] = f"af{i}"
+    vrot = None
+    if video:
+        c = esc_filtro(cor)
+        vf = []
+        if entrada_s:
+            vf.append(f"fade=t=in:st=0:d={float(entrada_s):.3f}:color={c}")
+        if saida_s:
+            vf.append(f"fade=t=out:st={max(0.0, dur - float(saida_s)):.3f}:d={float(saida_s):.3f}:color={c}")
+        w, h = _dimensoes(info["v"])
+        par = "" if w % 2 == 0 and h % 2 == 0 else ",scale=trunc(iw/2)*2:trunc(ih/2)*2"
+        grafo.append(f"[0:V:0]{','.join(vf)}{par}[vf]")
+        vrot = "vf"
+    partes = []
+    if entrada_s:
+        partes.append(f"fade in {float(entrada_s):g} s")
+    if saida_s:
+        partes.append(f"fade out {float(saida_s):g} s")
+    alvo = ("A" + ",".join(str(i + 1) for i in idx)) if idx else ""
+    if video:
+        alvo = (alvo + " + vídeo" if alvo else "vídeo") + (f" ({cor})" if cor != "black" else "")
+    return _editar_audio(doc, grafo, saidas, f"{' e '.join(partes)} em {alvo}", progresso, video=vrot,
+                         info=info)
+
+
+# ---- música de fundo
+def musica_fundo(doc: Documento, arquivo: str | Path, modo: str = "mixar", faixa: int = 1,
+                 volume_db: float | None = None, loop: bool = True, fade_in_s: float = 1.0,
+                 fade_out_s: float = 2.0, inicio=None, fim=None, musica_inicio=None,
+                 ducking: bool = False, ducking_db: float = 12.0, titulo: str | None = None,
+                 estado: dict | None = None, progresso=None) -> dict:
+    """Põe uma música (arquivo de áudio do usuário) no vídeo.
+    modo 'mixar': soma a música à faixa `faixa` (amix normalize=0; a voz fica igual);
+         'trocar': a música substitui a faixa `faixa`; 'nova_faixa': a música vira uma faixa nova (A1 fica).
+    volume_db: ganho da música (padrão -15 dB em mixar/nova_faixa, 0 em trocar). loop: repete a música se
+    ela for menor que o trecho. fade_in_s/fade_out_s: fades da música. inicio/fim: onde a música toca no
+    vídeo (padrão: o vídeo todo). musica_inicio: pula o começo da música (ex. '0:30').
+    ducking: abaixa a música enquanto há voz na faixa `faixa` (sidechaincompress), em ~ducking_db dB."""
+    modo = (modo or "mixar").lower()
+    if modo not in ("mixar", "trocar", "nova_faixa"):
+        raise ValueError("modo: 'mixar', 'trocar' ou 'nova_faixa'")
+    musica = Path(arquivo).expanduser().resolve()
+    if not musica.is_file():
+        raise FileNotFoundError(f"música não encontrada: {musica}")
+    pm = ffprobe(musica)
+    if not faixas_audio(pm):
+        raise ValueError(f"o arquivo da música não tem áudio: {musica.name}")
+    dur_m = duracao(pm)
+    entrada = doc.atual()
+    info = _info_audio(entrada)
+    auds, dur = info["auds"], info["dur"]
+    avisos: list[str] = []
+    if not auds:
+        if modo == "mixar":
+            avisos.append("o vídeo não tinha áudio: a música entrou como faixa nova")
+        modo, ducking = "nova_faixa", False
+        k = None
+        ref = {"sample_rate": 48000, "channels": 2}
+    else:
+        k = _faixa_valida(faixa, len(auds))
+        ref = auds[k]
+    if ducking and modo == "trocar":
+        raise ValueError("ducking abaixa a música sob a voz; em modo 'trocar' a voz sai. "
+                         "Use modo='mixar' ou 'nova_faixa'")
+    if ducking and not 3 <= float(ducking_db) <= 40:
+        raise ValueError("ducking_db entre 3 e 40 dB")
+    if volume_db is None:
+        volume_db = 0.0 if modo == "trocar" else -15.0
+    est = dict(estado or {})
+    est.setdefault("duracao", dur)
+    a = max(0.0, parse_tempo(inicio, est)) if inicio is not None else 0.0
+    b = min(dur, parse_tempo(fim, est)) if fim is not None else dur
+    if b - a < 0.1:
+        raise ValueError(f"trecho curto demais para a música: {fmt_tempo(a)} → {fmt_tempo(b)}")
+    m0 = max(0.0, parse_tempo(musica_inicio, est)) if musica_inicio is not None else 0.0
+    if m0 >= dur_m:
+        raise ValueError(f"musica_inicio além do fim da música ({fmt_tempo(dur_m)})")
+    toca = b - a
+    if not loop and dur_m - m0 < toca:
+        toca = dur_m - m0
+        avisos.append(f"a música acaba em {fmt_tempo(a + toca)} (loop=False); depois fica sem música")
+    sr = int(ref.get("sample_rate") or 48000)
+    lay = _layout(ref) if auds else "stereo"
+    fi = min(float(fade_in_s or 0), toca / 2)
+    fo = min(float(fade_out_s or 0), toca / 2)
+    entradas = (["-stream_loop", "-1"] if loop else []) + (["-ss", f"{m0:.3f}"] if m0 else [])
+    entradas += ["-i", str(musica)]
+    mc = [f"[1:a:0]aresample={sr},aformat=sample_rates={sr}:channel_layouts={lay}",
+          f"volume={float(volume_db):g}dB", f"atrim=duration={toca:.6f}", "asetpts=PTS-STARTPTS"]
+    if fi > 0:
+        mc.append(f"afade=t=in:st=0:d={fi:.3f}")
+    if fo > 0:
+        mc.append(f"afade=t=out:st={toca - fo:.3f}:d={fo:.3f}")
+    if a > 0:
+        mc.append(f"adelay=delays={int(round(a * 1000))}:all=1")
+    mc.append(f"apad=whole_dur={dur:.6f},atrim=duration={dur:.6f}")
+    grafo = [",".join(mc) + "[mus]"]
+    detalhes: dict = {"modo": modo, "musica": musica.name, "duracao_musica": fmt_tempo(dur_m),
+                      "volume_db": float(volume_db), "toca": f"{fmt_tempo(a)}→{fmt_tempo(a + toca)}",
+                      "loop": bool(loop and dur_m - m0 < b - a)}
+    rot_mus = "mus"
+    if ducking:
+        # limiar adaptado à voz: entre o piso e o nível da fala; razão calculada para a redução pedida
+        niv = niveis_audio(entrada, k)
+        dbs = [d for _, d in niv]
+        piso, fala = max(-90.0, _percentil(dbs, 10)), _percentil(dbs, 80)
+        lim = (piso + fala) / 2 if fala - piso >= 12 else fala - 10
+        alvo = ducking_db * 1.2  # o detector RMS do compressor mede ~1,2× menos excesso que as janelas de 50 ms
+        lim = min(lim, fala - alvo / 0.9)
+        lim = max(lim, -60.0)
+        excesso = fala - lim
+        razao = 20.0 if alvo >= 0.9 * excesso else 1 / (1 - alvo / excesso)
+        razao = min(20.0, max(1.5, razao))
+        thr = 10 ** (lim / 20)
+        voz_sc = f"[0:a:{k}]"
+        if modo == "mixar":
+            grafo.append(f"[0:a:{k}]asplit=2[voz][sc0]")
+            voz_sc = "[sc0]"
+        grafo.append(f"{voz_sc}highpass=f=120,lowpass=f=6000,aresample={sr},"
+                     f"aformat=sample_rates={sr}:channel_layouts={lay},apad[sc]")  # apad: a música não acaba antes
+        grafo.append(f"[mus][sc]sidechaincompress=threshold={thr:.6f}:ratio={razao:.2f}:attack=20:"
+                     f"release=350:knee=2:makeup=1[musd]")
+        rot_mus = "musd"
+        detalhes["ducking"] = {"reducao_db": ducking_db, "limiar_db": round(lim, 1), "razao": round(razao, 2),
+                               "voz_db": round(fala, 1), "piso_db": round(piso, 1)}
+    saidas, novas = {}, []
+    if modo == "mixar":
+        voz = "[voz]" if ducking else f"[0:a:{k}]"
+        # duration=longest (a música já tem a duração exata): com duration=first e o vídeo copiado, o ffmpeg 6.1
+        # perdia os últimos ~85 ms do áudio
+        grafo.append(f"{voz}[{rot_mus}]amix=inputs=2:normalize=0:duration=longest[mix]")
+        saidas[k] = "mix"
+        desc = f"música '{musica.name}' mixada em A{k + 1}"
+    elif modo == "trocar":
+        saidas[k] = rot_mus
+        desc = f"trocou A{k + 1} pela música '{musica.name}'"
+    else:
+        novas.append((rot_mus, {"title": titulo or f"Música ({musica.stem})"}))
+        desc = f"música '{musica.name}' como nova faixa A{len(auds) + 1}"
+    desc += f" ({float(volume_db):+g} dB"
+    if detalhes["loop"]:
+        desc += ", em loop"
+    if ducking:
+        desc += f", ducking −{ducking_db:g} dB"
+    desc += ")" + (f" em {fmt_tempo(a)}→{fmt_tempo(b)}" if a > 0 or b < dur - 0.01 else "")
+    extra = {"detalhes": detalhes}
+    if avisos:
+        extra["avisos"] = avisos
+    return _editar_audio(doc, grafo, saidas, desc, progresso, entradas, novas=novas, info=info, extra=extra)

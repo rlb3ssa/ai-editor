@@ -91,6 +91,11 @@ RECURSOS_FFMPEG = [
     ("filters", "rubberband", False, "mudar velocidade sem alterar o tom"),
     ("filters", "arnndn", False, "redução de ruído (RNNoise)"),
     ("filters", "whisper", False, "transcrição direto no ffmpeg (ffmpeg 8+)"),
+    ("filters", "drawtext", False, "sobrepor texto (sobrepor_texto; precisa de libfreetype)"),
+    ("filters", "vidstabdetect", False, "estabilizar em 2 passes (vid.stab; sem ele usa deshake)"),
+    ("filters", "vidstabtransform", False, "estabilizar em 2 passes (vid.stab)"),
+    ("filters", "deshake", False, "estabilizar (alternativa simples ao vid.stab)"),
+    ("filters", "colortemperature", False, "temperatura de cor (ajustar_cor; sem ele usa colorbalance)"),
 ]
 
 

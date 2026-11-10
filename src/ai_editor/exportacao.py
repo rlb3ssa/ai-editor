@@ -30,11 +30,17 @@ class _Sinais(QObject):
 
 
 class _Tarefa(QRunnable):
-    def __init__(self, kw: dict, sinais: _Sinais, cancelar: threading.Event):
+    def __init__(self, kw: dict, sinais: _Sinais, cancelar: threading.Event, fim: threading.Event):
         super().__init__()
-        self.kw, self.sinais, self.cancelar = kw, sinais, cancelar
+        self.kw, self.sinais, self.cancelar, self.fim = kw, sinais, cancelar, fim
 
     def run(self):
+        try:
+            self._run()
+        finally:
+            self.fim.set()
+
+    def _run(self):
         try:
             r = core.exportar(progresso=self.sinais.progresso.emit, cancelar=self.cancelar.is_set, **self.kw)
             self.sinais.pronto.emit(r)
@@ -53,6 +59,7 @@ class PainelExportar(QWidget):
         self._icone = icone
         self._fundo: QPixmap | None = None
         self._cancelar: threading.Event | None = None
+        self._fim: threading.Event | None = None
         self.exportando = False
         self.fracao = 0.0
         self.resultado: dict | None = None
@@ -257,8 +264,14 @@ class PainelExportar(QWidget):
         self._botoes()
 
     def _destino(self) -> str | None:
+        """Pasta (padrão) ou arquivo: com extensão e sem ser uma pasta existente, é o nome do arquivo."""
         t = self.e_destino.text().strip()
-        return (t.rstrip("/") + "/") if t else None  # sempre pasta
+        if not t:
+            return None
+        p = Path(t).expanduser()
+        if p.suffix and not p.is_dir():
+            return str(p)
+        return str(p).rstrip("/") + "/"
 
     def _botoes(self):
         if self.isVisible():
@@ -323,6 +336,7 @@ class PainelExportar(QWidget):
         self.resultado = self.erro = None
         self._rotulo = p["rotulo"]
         self._cancelar = threading.Event()
+        self._fim = threading.Event()
         self.barra.setValue(0)
         self.barra.show()
         self.b_pasta.hide()
@@ -331,7 +345,7 @@ class PainelExportar(QWidget):
         self.l_status.setProperty("tipo", "")
         self._repolir(self.l_status)
         self._botoes()
-        QThreadPool.globalInstance().start(_Tarefa(kw, self._sinais, self._cancelar))
+        QThreadPool.globalInstance().start(_Tarefa(kw, self._sinais, self._cancelar, self._fim))
 
     def _progresso(self, f: float):
         self.fracao = f
@@ -376,6 +390,14 @@ class PainelExportar(QWidget):
     def cancelar(self):
         if self.exportando and self._cancelar:
             self._cancelar.set()
+
+    def encerrar(self, timeout: float = 10.0) -> None:
+        """Antes de fechar/recarregar a janela: cancela a exportação e espera o ffmpeg sair
+        (senão ele seguiria órfão e deixaria um .parcial gigante)."""
+        if self._cancelar:
+            self._cancelar.set()
+        if self._fim and not self._fim.is_set():
+            self._fim.wait(timeout)
 
     @staticmethod
     def _repolir(w):
