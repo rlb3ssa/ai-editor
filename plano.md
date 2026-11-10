@@ -175,7 +175,7 @@ Código em `core.py`, seção "imagem (Fase 3)".
 ### Fase 4 — Áudio prático
 Só com o ffmpeg (nada baixado). Código em `core.py`, seção "áudio (Fase 4)"; helper `_editar_audio` (vídeo e faixas
 não tocadas copiados sem perda, faixa editada re-encodada com `codec_audio` e tags reaplicadas). Medições por janelas
-de 50 ms do `astats` (`niveis_audio`, p10 = piso, p80 = fala).
+de 50 ms do `astats` (`niveis_audio`, p10 = piso; fala = p80 das janelas acima do piso + 10 dB, `_niveis_fala`).
 - [x] Redução de ruído → `reduzir_ruido`. `afftdn` (padrão): acha a pausa mais quieta (≥ 0,3 s, ≤ p10+3 dB, quando há
   ≥ 10 dB de contraste fala/pausa), coloca esse trecho **antes** do áudio (`concat` com uma 2ª entrada `-ss/-t`) para o
   filtro aprender o perfil (`asendcmd` → `sn start/stop`) e corta de volta (`atrim`); `nf` = ruído medido + 18 dB
@@ -225,6 +225,34 @@ de 50 ms do `astats` (`niveis_audio`, p10 = piso, p80 = fala).
   somando alguns ms de preenchimento no fim; sem DeepFilterNet/RNNoise embutidos, voz com ruído não estacionário
   fica a cargo do usuário trazer um modelo `.rnnn`. Bug do ffmpeg 6.1 evitado: `amix duration=first` com o vídeo
   copiado perdia ~85 ms do fim do áudio → usa `duration=longest` (a música já tem a duração exata).
+- [x] Correções da revisão (2026-11-10), cada uma reproduzida antes e medida depois:
+  - Corte em lotes em `.webm` (20 trechos): as partes `.mkv` saíam em x264 e a junção `-c:v copy` no WebM falhava.
+    Agora as partes usam `codec_video(saida.suffix)` (VP9) → 20,024 s, 600 quadros. Pastas `lotes-*` órfãs (> 10 min
+    sem escrita, contando os arquivos dentro) são apagadas no início de `_cortar_preciso` (`_limpar_lotes_orfaos`).
+  - `reduzir_ruido` com amostra de perfil perdia o start_time da faixa (áudio em 0,478 s ficava 453 ms adiantado:
+    o `concat` não desconta o pts inicial do 2º segmento). Entradas do concat zeradas com `asetpts=PTS-STARTPTS` e
+    a saída volta ao início da faixa (`+st/TB`) → desvio −0,7 ms (= recodificação AAC pura).
+  - Latência dos filtros compensada: afftdn 25 ms e anlmdn 8 ms (medidos com clique sintético por `latencia_filtro`,
+    com cache; iguais de 8 a 96 kHz, com qualquer nr/nf/s e com `enable`). `apad` desse tanto + `atrim` no começo
+    → desvio 25 → 0 ms e 8 → 0 ms, duração mantida. rnnoise: a medida só vale se o clique passar (senão 0).
+  - Limiar automático (`_niveis_fala`): "fala" = p80 só das janelas acima do piso + 10 dB (p95 se houver < 3). Em
+    `remover_silencios`, ducking e `medir_ruido`. sync.mp4 (4 bipes em 12 s): antes fala −63 dB, limiar −60, nada
+    achado; depois fala −21, limiar −52,7, 6 silêncios, 12 s → 3,63 s; o limiar do ducking passou de −60 (piso da
+    fórmula) para −43,7 dB.
+  - `fade_audio` usa início/fim de cada faixa (`_extensao_faixa`: start_time, duração, tag DURATION do MKV):
+    áudio de 9 s em vídeo de 12 s antes não tinha fade out (ia de 10 a 12 s); agora −9 → −26 dB em 7–9 s; áudio em
+    0,478 s com fade in desde 0,478. O fade de vídeo usa a extensão do vídeo; o `scale` par ganhou `setsar=1`.
+  - `musica_fundo`: `loop` + `musica_inicio` usava `-ss` com `-stream_loop` (timestamps com saltos, voltas de
+    2,99 s em vez de 3,04). Decisão: só a 1ª volta pula a introdução; as seguintes tocam a música inteira (como um
+    player em repetição) — duas entradas (`-ss m0 -i` + `-stream_loop -1 -i`) + `concat`, pts por amostras
+    (`asetpts=N/SR/TB`), sem `aloop` (guardaria a música na memória). Chirp de 5 s, m0 = 2: 2→5, 0→5, 0→5, exato.
+    `trocar` com inicio/fim silencia o original só dentro do trecho (`volume` com rampa de 0,1 s) e mixa a música
+    ali (antes zerava o resto da faixa). Soma com `alimiter=limit=0.97:level=0:latency=1` (`level=1`, o padrão,
+    normaliza para 0 dB!): pico +2,2 → −0,22 dBFS. Música alinhada à extensão da voz (pts 0,478…): duração da faixa
+    12,934 → 12,499 s (vídeo 12,5). Voz AAC 6 canais "unknown" passa por `_filtro_layout` antes de somar.
+  - `.m4a` continua `.m4a` ao ganhar faixa (MP4 aceita várias); wav/mp3/flac/ogg/opus/aac → `.mka`.
+  - Áudio todo em silêncio → erro claro (antes `concat=n=0`); erro "nenhum silêncio" sugere limiar = atual + 10 dB
+    (e duracao_min_s/2) e mostra o limiar usado. MCP: `inicio`/`fim`/`musica_inicio` aceitam número (`str | float`).
 
 ### Fase 5 — Montagem e análise
 - [ ] Juntar outro arquivo (emendar vídeos diferentes, normalizando resolução/fps/áudio).

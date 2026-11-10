@@ -380,7 +380,8 @@ def _taxa_video(v: dict) -> str:
     return taxa
 
 
-def _segmentos_av(segs: list[dict], auds: list[dict], taxa: str | None, ent_video) -> list[str]:
+def _segmentos_av(segs: list[dict], auds: list[dict], taxa: str | None, ent_video,
+                  faixas: list[int] | None = None) -> list[str]:
     """Filtros de N segmentos (entrada i = `-ss a -t ... -i` do segmento i) + concat → [vc] e [ao0], [ao1]...
     seg: {"a", "b" (None = até o fim), "fator", "manter_tom", "silenciar"} ou {"congelar": True, "d": s}
     (entrada de congelar: começa meio quadro antes do quadro desejado).
@@ -393,7 +394,9 @@ def _segmentos_av(segs: list[dict], auds: list[dict], taxa: str | None, ent_vide
       duração exata (aresample first_pts=0 preenche atraso no início, apad no fim) e o vídeo vai para a
       grade `fps` do segmento com exatamente round(T_fim·fps) − round(T_ini·fps) quadros (erro ≤ ½ quadro,
       sem acumular).
-    ent_video(i) → rótulo de entrada do vídeo do segmento i já com prefixo (ex.: normalização de SAR)."""
+    ent_video(i) → rótulo de entrada do vídeo do segmento i já com prefixo (ex.: normalização de SAR).
+    faixas: índice de cada item de `auds` na entrada (`[i:a:N]`); padrão 0, 1, 2... As saídas são sempre
+    [ao0], [ao1]... na ordem de `auds`."""
     fps = _fps_stream({"r_frame_rate": taxa}) if taxa and "/" in taxa else float(taxa or 0)
     grafo, cv, ca = [], "", ""
     t_saida = 0.0
@@ -443,7 +446,7 @@ def _segmentos_av(segs: list[dict], auds: list[dict], taxa: str | None, ent_vide
                 if d_out is not None:
                     ff.append(f"apad=whole_dur={d_out:.6f},atrim=end={d_out:.6f}")
                 cad = ",".join(f for f in ff if f)
-            grafo.append(f"[{i}:a:{k}]{cad}[a{k}_{i}]")
+            grafo.append(f"[{i}:a:{faixas[k] if faixas else k}]{cad}[a{k}_{i}]")
             ca += f"[a{k}_{i}]"
         if d_out is not None:
             t_saida += d_out
@@ -1547,8 +1550,14 @@ def exportar(arquivo: Path | str, predefinicao: str | None = None, formato: str 
     n = len(lista) if lista else 1
     entradas: list[str] = []
     if lista:
+        # µs arredondados para baixo (3 casas perdiam o quadro de um corte exato, ver _cmd_preciso); com vários
+        # trechos o -t tem folga e o fim exato vem do trim/atrim de _segmentos_av
+        segs = []
         for a, b in lista:
-            entradas += ["-ss", f"{a:.3f}", "-t", f"{b - a:.3f}"] + dec + ["-i", str(entrada)]
+            a6, b6 = int(a * 1e6) / 1e6, int(b * 1e6) / 1e6
+            segs.append({"a": a6, "b": b6})
+            entradas += ["-ss", f"{a6:.6f}", "-t", f"{b6 - a6 + (_FOLGA_T if n > 1 else 0):.6f}"] \
+                + dec + ["-i", str(entrada)]
     else:
         entradas += dec + ["-i", str(entrada)]
     w, h = _dimensoes(vids[0]) if vids else (0, 0)
@@ -1559,17 +1568,10 @@ def exportar(arquivo: Path | str, predefinicao: str | None = None, formato: str 
         grafo: list[str] = []
         ia = idx_a if com_audio else []
         if n > 1:
-            ent = ""
-            for i in range(n):
-                if tem_v:
-                    grafo.append(f"[{i}:V:0]setpts=PTS-STARTPTS[v{i}]")
-                    ent += f"[v{i}]"
-                for k in ia:
-                    grafo.append(f"[{i}:a:{k}]asetpts=PTS-STARTPTS[a{k}_{i}]")
-                    ent += f"[a{k}_{i}]"
-            sai = ("[vc]" if tem_v else "") + "".join(f"[ac{k}]" for k in ia)
-            grafo.append(f"{ent}concat=n={n}:v={int(tem_v)}:a={len(ia)}{sai}")
-            v_ent, a_map = "vc", [f"[ac{k}]" for k in ia]
+            # mesmos filtros do corte preciso: sincronia exata, vídeo com nº exato de quadros por trecho
+            grafo += _segmentos_av(segs, [auds[k] for k in ia], _taxa_video(vids[0]) if tem_v else None,
+                                   lambda i: f"[{i}:V:0]", faixas=ia)
+            v_ent, a_map = "vc", [f"[ao{j}]" for j in range(len(ia))]
         else:
             v_ent, a_map = "0:V:0", [f"0:a:{k}" for k in ia]
         args: list[str] = []
@@ -2652,6 +2654,9 @@ def borrar_area(doc: Documento, retangulos=None, trajetoria=None, modo: str = "b
 
 MODELOS_DIR = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")) / "ai-editor" / "modelos"
 _INTENSIDADES = {"leve": 10.0, "media": 20.0, "média": 20.0, "medio": 20.0, "forte": 32.0}
+# limitador depois de somar música e voz: teto 0,97 (≈ -0,26 dBFS), sem auto-nível (level=1, o padrão do
+# ffmpeg 6.1, normaliza a saída para 0 dB) e com o atraso de lookahead compensado (latency=1)
+_LIMITADOR = "alimiter=limit=0.97:level=0:latency=1"
 _LOTE_CORTES = 8  # trechos por comando no corte preciso (cada trecho = uma entrada/decodificador aberto;
 # 12 entradas 720p com threads automáticas ≈ 800 MB, 8 com -threads 2 ≈ 350 MB)
 
@@ -2855,7 +2860,8 @@ def _editar_audio(doc: Documento, grafo: list[str], saidas: dict[int, str], desc
     info = info or _info_audio(entrada)
     auds = info["auds"]
     ext = entrada.suffix.lower()
-    if novas and ext in (".wav", ".mp3", ".flac", ".ogg", ".opus", ".m4a", ".aac") and not info["v"]:
+    # .m4a é MP4: aceita várias faixas de áudio e continua .m4a
+    if novas and ext in (".wav", ".mp3", ".flac", ".ogg", ".opus", ".aac") and not info["v"]:
         ext = ".mka"  # contêiner de áudio com uma faixa só: a nova faixa pede um que aceite várias
         extra = {**(extra or {}), "avisos": (extra or {}).get("avisos", []) +
                  ["o arquivo agora é .mka (o formato original só guarda uma faixa de áudio)"]}
@@ -2884,7 +2890,7 @@ def _editar_audio(doc: Documento, grafo: list[str], saidas: dict[int, str], desc
             if valor:
                 cmd += [f"-metadata:s:a:{k}", f"{chave}={valor}"]
     cmd += ["-map_metadata", "0"]
-    if saida.suffix in (".mp4", ".mov", ".m4v"):
+    if saida.suffix in (".mp4", ".mov", ".m4v", ".m4a"):
         cmd += ["-movflags", "+faststart"]
     cmd.append(str(saida))
     return _rodar_versao(doc, saida, [cmd], [dur_saida or info["dur"]], descricao, progresso, extra)
@@ -3260,7 +3266,7 @@ def fade_audio(doc: Documento, entrada_s: float | None = None, saida_s: float | 
             d = min(float(saida_s), vfim - vi)
             vf.append(f"fade=t=out:st={vfim - d:.3f}:d={d:.3f}:color={c}")
         w, h = _dimensoes(info["v"])
-        par = "" if w % 2 == 0 and h % 2 == 0 else ",scale=trunc(iw/2)*2:trunc(ih/2)*2"
+        par = "" if w % 2 == 0 and h % 2 == 0 else "," + _PAR_FILTRO  # scale par + setsar=1
         grafo.append(f"[0:V:0]{','.join(vf)}{par}[vf]")
         vrot = "vf"
     partes = []
@@ -3346,29 +3352,43 @@ def musica_fundo(doc: Documento, arquivo: str | Path, modo: str = "mixar", faixa
         avisos.append(f"a música acaba em {fmt_tempo(a + toca)} (loop=False); depois fica sem música")
     sr = int(ref.get("sample_rate") or 48000)
     lay = _layout(ref) if auds else "stereo"
+    # AAC de 6 canais vem com layout "unknown": renomeia para o padrão antes de somar (amix/aformat quebram)
+    pre = _filtro_layout(ref) if auds else ""
     fi = min(float(fade_in_s or 0), toca / 2)
     fo = min(float(fade_out_s or 0), toca / 2)
-    entradas = (["-stream_loop", "-1"] if loop else []) + (["-ss", f"{m0:.3f}"] if m0 else [])
-    entradas += ["-i", str(musica)]
-    mc = [f"[1:a:0]aresample={sr},aformat=sample_rates={sr}:channel_layouts={lay}",
-          f"volume={float(volume_db):g}dB", f"atrim=duration={toca:.6f}", "asetpts=PTS-STARTPTS"]
+    em_loop = bool(loop and dur_m - m0 < b - a)
+    prep = f"aresample={sr},aformat=sample_rates={sr}:channel_layouts={lay},asetpts=PTS-STARTPTS"
+    grafo = []
+    if em_loop and m0:  # 1ª volta a partir de m0, depois a música inteira em loop
+        entradas = ["-ss", f"{m0:.3f}", "-i", str(musica), "-stream_loop", "-1", "-i", str(musica)]
+        grafo.append(f"[1:a:0]{prep}[m1];[2:a:0]{prep}[m2]")
+        mc = ["[m1][m2]concat=n=2:v=0:a=1"]
+    else:
+        entradas = (["-stream_loop", "-1"] if em_loop else []) + (["-ss", f"{m0:.3f}"] if m0 else [])
+        entradas += ["-i", str(musica)]
+        mc = [f"[1:a:0]{prep}"]
+    # pts pela contagem de amostras: as emendas do loop (e do concat) ficam contínuas e exatas
+    mc += ["asetpts=N/SR/TB", f"volume={float(volume_db):g}dB", f"atrim=duration={toca:.6f}"]
     if fi > 0:
         mc.append(f"afade=t=in:st=0:d={fi:.3f}")
     if fo > 0:
         mc.append(f"afade=t=out:st={toca - fo:.3f}:d={fo:.3f}")
     if a > 0:
         mc.append(f"adelay=delays={int(round(a * 1000))}:all=1")
-    mc.append(f"apad=whole_dur={dur:.6f},atrim=duration={dur:.6f}")
-    grafo = [",".join(mc) + "[mus]"]
+    # pts aqui = tempo do vídeo a partir de 0; recorta a extensão da faixa (de st_f a fim_f, pts mantidos)
+    mc.append(f"apad=whole_dur={fim_f:.6f},atrim=start={st_f:.6f}:end={fim_f:.6f}")
+    grafo.append(",".join(mc) + "[mus]")
     detalhes: dict = {"modo": modo, "musica": musica.name, "duracao_musica": fmt_tempo(dur_m),
                       "volume_db": float(volume_db), "toca": f"{fmt_tempo(a)}→{fmt_tempo(a + toca)}",
-                      "loop": bool(loop and dur_m - m0 < b - a)}
+                      "loop": em_loop}
+    if em_loop and m0:
+        detalhes["loop_desde"] = "1ª volta a partir de musica_inicio; as seguintes, a música inteira"
     rot_mus = "mus"
     if ducking:
         # limiar adaptado à voz: entre o piso e o nível da fala; razão calculada para a redução pedida
         niv = niveis_audio(entrada, k)
         dbs = [d for _, d in niv]
-        piso, fala = max(-90.0, _percentil(dbs, 10)), _percentil(dbs, 80)
+        piso, fala = _niveis_fala(dbs)
         lim = (piso + fala) / 2 if fala - piso >= 12 else fala - 10
         alvo = ducking_db * 1.2  # o detector RMS do compressor mede ~1,2× menos excesso que as janelas de 50 ms
         lim = min(lim, fala - alvo / 0.9)
@@ -3377,9 +3397,9 @@ def musica_fundo(doc: Documento, arquivo: str | Path, modo: str = "mixar", faixa
         razao = 20.0 if alvo >= 0.9 * excesso else 1 / (1 - alvo / excesso)
         razao = min(20.0, max(1.5, razao))
         thr = 10 ** (lim / 20)
-        voz_sc = f"[0:a:{k}]"
+        voz_sc = f"[0:a:{k}]{pre}"
         if modo == "mixar":
-            grafo.append(f"[0:a:{k}]asplit=2[voz][sc0]")
+            grafo.append(f"[0:a:{k}]{pre}asplit=2[voz][sc0]")
             voz_sc = "[sc0]"
         grafo.append(f"{voz_sc}highpass=f=120,lowpass=f=6000,aresample={sr},"
                      f"aformat=sample_rates={sr}:channel_layouts={lay},apad[sc]")  # apad: a música não acaba antes
@@ -3390,14 +3410,26 @@ def musica_fundo(doc: Documento, arquivo: str | Path, modo: str = "mixar", faixa
                                "voz_db": round(fala, 1), "piso_db": round(piso, 1)}
     saidas, novas = {}, []
     if modo == "mixar":
-        voz = "[voz]" if ducking else f"[0:a:{k}]"
+        if not ducking:
+            grafo.append(f"[0:a:{k}]{pre}anull[voz]")
+        voz = "[voz]"
         # duration=longest (a música já tem a duração exata): com duration=first e o vídeo copiado, o ffmpeg 6.1
         # perdia os últimos ~85 ms do áudio
-        grafo.append(f"{voz}[{rot_mus}]amix=inputs=2:normalize=0:duration=longest[mix]")
+        grafo.append(f"{voz}[{rot_mus}]amix=inputs=2:normalize=0:duration=longest,{_LIMITADOR}[mix]")
         saidas[k] = "mix"
         desc = f"música '{musica.name}' mixada em A{k + 1}"
     elif modo == "trocar":
-        saidas[k] = rot_mus
+        # o original some só dentro de [a, b] (rampa de 0,1 s nas bordas que ficam dentro da faixa)
+        r = 0.1
+        lados = ([f"{a + r:.3f}-t"] if a > st_f + 0.01 else []) + ([f"t-{b - r:.3f}"] if b < fim_f - 0.01 else [])
+        if lados:
+            g = lados[0] if len(lados) == 1 else f"max({lados[0]},{lados[1]})"
+            ganho = esc_filtro(f"clip(({g})/{r},0,1)")
+            grafo.append(f"[0:a:{k}]{pre}volume={ganho}:eval=frame[orig]")
+            grafo.append(f"[orig][{rot_mus}]amix=inputs=2:normalize=0:duration=longest,{_LIMITADOR}[troca]")
+            saidas[k] = "troca"
+        else:
+            saidas[k] = rot_mus
         desc = f"trocou A{k + 1} pela música '{musica.name}'"
     else:
         novas.append((rot_mus, {"title": titulo or f"Música ({musica.stem})"}))
@@ -3589,7 +3621,9 @@ def juntar_arquivos(doc: Documento, arquivos: list, posicao="fim", transicao: st
 
     # ---- entradas e grafo
     cmd = FFMPEG[:]
-    poucas = len(segs) > 3  # muitos decodificadores abertos ao mesmo tempo: 2 threads cada
+    # um decodificador aberto por segmento (todos ao mesmo tempo): 2 threads cada limita a memória
+    # (crossfade 720p com 3 entradas: 630 → ~400 MB)
+    poucas = len(segs) > 1
     grafo: list[str] = []
     n = len(segs)
     for i, sg in enumerate(segs):

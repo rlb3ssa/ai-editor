@@ -563,7 +563,7 @@ async def borrar_area(retangulos: list[float] | list[list[float]] | None = None,
 # ---------------------------------------------------------------- áudio (Fase 4)
 @ferramenta
 async def reduzir_ruido(metodo: str = "afftdn", intensidade: str | float = "media", faixa: int = 1,
-                        inicio: str | None = None, fim: str | None = None,
+                        inicio: str | float | None = None, fim: str | float | None = None,
                         piso_ruido_db: float | None = None) -> dict:
     """Reduz ruído de fundo constante (chiado, ventilador, ar-condicionado, hum largo) de uma faixa de
     áudio (nova versão; vídeo e outras faixas copiados sem perda).
@@ -585,8 +585,8 @@ async def reduzir_ruido(metodo: str = "afftdn", intensidade: str | float = "medi
 
 @ferramenta
 async def remover_silencios(modo: str = "cortar", limiar_db: float | None = None, duracao_min_s: float = 0.6,
-                            margem_s: float = 0.15, faixa: int = 1, inicio: str | None = None,
-                            fim: str | None = None) -> dict:
+                            margem_s: float = 0.15, faixa: int = 1, inicio: str | float | None = None,
+                            fim: str | float | None = None) -> dict:
     """Corta as pausas/silêncios (vídeo e todas as faixas de áudio juntos, corte preciso; nova versão).
     A detecção usa a faixa `faixa` (1 = A1; normalmente a da voz).
     modo='analisar': só lista os silêncios e o que seria removido (não edita) — bom para mostrar ao usuário
@@ -627,7 +627,8 @@ async def fade_audio(entrada_s: float | None = None, saida_s: float | None = Non
 @ferramenta
 async def musica_fundo(arquivo: str, modo: str = "mixar", faixa: int = 1, volume_db: float | None = None,
                        loop: bool = True, fade_in_s: float = 1.0, fade_out_s: float = 2.0,
-                       inicio: str | None = None, fim: str | None = None, musica_inicio: str | None = None,
+                       inicio: str | float | None = None, fim: str | float | None = None,
+                       musica_inicio: str | float | None = None,
                        ducking: bool = False, ducking_db: float = 12.0, titulo: str | None = None) -> dict:
     """Adiciona ou troca a música de fundo a partir de um arquivo de áudio do usuário (mp3, wav, m4a...;
     nova versão).
@@ -637,7 +638,8 @@ async def musica_fundo(arquivo: str, modo: str = "mixar", faixa: int = 1, volume
     volume_db: volume da música (padrão -15 em mixar/nova_faixa, 0 em trocar; mais negativo = mais baixa).
     loop: repete a música se ela for menor que o trecho (padrão True). fade_in_s/fade_out_s: fades da música.
     inicio/fim: onde a música toca no vídeo (padrão: tudo). musica_inicio: começa a música desse ponto
-    dela (ex. '0:30' pula a introdução).
+    dela (ex. '0:30' pula a introdução; com loop, só a 1ª volta pula — as seguintes tocam a música inteira).
+    Com modo='trocar' e inicio/fim, o som original só some dentro do trecho.
     ducking=True: abaixa a música automaticamente enquanto alguém fala na faixa `faixa`, em ~ducking_db dB.
     Exemplos: "põe essa música de fundo baixinha" → arquivo=..., volume_db=-20; "música de fundo que abaixa
     quando eu falo" → ducking=True; "troca o áudio por essa música" → modo='trocar'."""

@@ -88,7 +88,7 @@ cancelar/fechar/estado, `predefinicao`, `trecho`=índice no combo, `limite_mb`, 
 - Edições de imagem (Fase 3, `core.py` seção "imagem"): `_editar_quadros` (só quadros; áudio/legendas copiados)
   e `_editar_linha_tempo` (velocidade/congelar: uma entrada `-ss/-t` por segmento + `concat`; **nunca** `split` +
   `trim` para segmentos, que guarda quadros decodificados na memória). Filtros por segmento em `_segmentos_av`
-  (também usado pelo `_cmd_preciso`): nada de `PTS-STARTPTS` por faixa, fim por `trim`/`atrim` (o `-t` da entrada
+  (também usado pelo `_cmd_preciso` e pelo `exportar` com vários trechos): nada de `PTS-STARTPTS` por faixa, fim por `trim`/`atrim` (o `-t` da entrada
   conta do 1º quadro de cada faixa), concat de vídeo e de áudio separados, vídeo com nº exato de quadros na grade
   `fps` (o concat estima o fim do vídeo e cada trecho ganhava até 1 quadro). Layout de canais: `_filtro_layout`. Valores de texto/caminho/expressão no
   `-filter_complex` passam por `core.esc_filtro` (2 níveis de escape; `drawtext` com `expansion=none`).
@@ -101,7 +101,13 @@ cancelar/fechar/estado, `predefinicao`, `trecho`=índice no combo, `limite_mb`, 
   antes do áudio (`concat`) + `asendcmd` `sn start/stop` + `atrim`. `amix duration=first` com vídeo copiado perde
   ~85 ms do fim no ffmpeg 6.1: use `duration=longest` com as entradas já do tamanho certo. Cortes em tempos de quadro:
   `_cmd_preciso` escreve `-ss` em µs arredondados para baixo (antes, 3 casas: 8,16667 → 8,167 perdia o quadro). Muitos trechos no
-  corte preciso = muitos decodificadores abertos: lotes de 8 com `-threads 2` (`_cortar_preciso`).
+  corte preciso = muitos decodificadores abertos: lotes de 8 com `-threads 2` (`_cortar_preciso`; partes .mkv já no
+  codec de vídeo do contêiner final, senão o `-c:v copy` da junção falha em .webm).
+  No `-filter_complex` o pts da faixa = start_time dela menos o do contêiner (áudio em 0,478 s tem pts 0,478; use
+  `_extensao_faixa`): `concat` **não** desconta o pts inicial do 2º segmento (zere com `asetpts=PTS-STARTPTS` antes),
+  `afade`/`atrim start=`/`enable` usam pts. `afftdn` atrasa 25 ms e `anlmdn` 8 ms sem mudar o nº de amostras
+  (`latencia_filtro`: `apad` + `atrim`). `alimiter` tem `level=1` por padrão (normaliza para 0 dB): use `level=0`.
+  `-ss` junto com `-stream_loop` corrompe os timestamps: entradas separadas + `concat` + `asetpts=N/SR/TB`.
 
 ## Git
 - Trabalhe na branch **`dev`**. Commits pequenos, mensagem em português no imperativo
