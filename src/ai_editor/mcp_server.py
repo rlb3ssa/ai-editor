@@ -354,6 +354,81 @@ async def ffmpeg_livre(argumentos: str, descricao: str, extensao: str | None = N
     return _apos_edicao(v, doc)
 
 
+# ---------------------------------------------------------------- exportação
+@ferramenta
+async def exportar(predefinicao: str | None = None, formato: str | None = None,
+                   inicio: str | None = None, fim: str | None = None, trechos: list[list[str]] | None = None,
+                   tempo: str | None = None, destino: str | None = None, alvo_mb: float | None = None,
+                   largura: int | None = None, altura: int | None = None, qualidade: str | int | None = None,
+                   fps: float | None = None, sem_audio: bool = False, faixa: int | None = None,
+                   enquadramento: str | None = None, arquivo: str | None = None) -> dict:
+    """EXPORTA para um ARQUIVO NOVO (converter, compartilhar, extrair áudio, tirar foto de um quadro).
+    Diferente de editar: não cria versão, não altera o original nem recarrega a janela. Parte do arquivo
+    atual do documento (a última versão, se houver edições não salvas). Nunca sobrescreve: o nome é
+    automático ao lado do original (`video.whatsapp.mp4`, `video.whatsapp.2.mp4`, `video.mp3`...).
+
+    predefinicao:
+      whatsapp — MP4 H.264+AAC leve, até 720p, cabe em ~16 MB quando possível
+      youtube — MP4 H.264 alta qualidade, mesma resolução, AAC 192k
+      instagram (ou reels) — 1080x1920 vertical; vídeo horizontal ganha fundo desfocado
+                             (enquadramento='desfocado' | 'recorte' (centro) | 'barras')
+      mp4 — H.264+AAC boa qualidade, todas as faixas de áudio
+      menor — H.265 com CRF alto (arquivo bem menor); menor_vp9 — WebM VP9
+      webm — VP9+Opus;  gif — GIF animado 480 px, 12,5 fps, sem som
+      transparente — WebM VP9 com alfa (yuva420p); transparente_mov (ou prores) — ProRes 4444 .mov com alfa
+      mp3 | m4a | opus | ogg | wav | flac — só o áudio
+      png | jpg — foto do quadro exato em `tempo` (padrão: posição atual). Não há ferramenta separada de foto.
+    formato: só a extensão ('mp3', 'mkv', 'webm'...), alternativa à predefinição; com predefinição, troca o contêiner.
+    inicio/fim: exporta só esse trecho; trechos=[[ini, fim], ...] exporta vários trechos emendados (corte exato).
+      Tempos como nas outras ferramentas: '1:23.5', 'atual', 'm1', 'in', 'out', 'm2+0.5'...
+    destino: pasta ou caminho de arquivo (padrão: pasta do original).
+    alvo_mb: tamanho máximo em MB → calcula o bitrate e codifica em 2 passes (vídeo) ou CBR (áudio).
+    largura/altura: redimensiona (só uma = mantém proporção; as duas = cabe dentro da caixa).
+    qualidade: 'alta' | 'normal' | 'baixa' ou número CRF (menor = melhor). fps: muda a taxa de quadros.
+    sem_audio=True tira o som; faixa=N escolhe a faixa de áudio (padrão: A1, ou todas em mp4/webm/menor).
+
+    Exemplos de pedidos:
+      "converte para mp4 leve para WhatsApp" → predefinicao='whatsapp'
+      "gera um GIF do trecho amarelo" → predefinicao='gif', inicio='m1', fim='m2' (veja `estado`.trechos_marcados)
+      "exporta só o áudio em mp3" → predefinicao='mp3'
+      "tira um print deste quadro" → predefinicao='png' (tempo='atual')
+      "manda para o Instagram só do 0:10 ao 0:40" → predefinicao='instagram', inicio='0:10', fim='0:40'
+      "preciso que fique com menos de 8 MB" → predefinicao='mp4', alvo_mb=8
+    Devolve caminho, tamanho, duração, codecs, resolução e avisos. Pode demorar em vídeos longos
+    (a barra de status da janela mostra o progresso)."""
+    est = None
+    if cliente.vivo():
+        est = _estado()
+    if arquivo is None:
+        if not est or not est.get("documento"):
+            raise RuntimeError("nenhum vídeo aberto no player; use `abrir` ou passe `arquivo`")
+        arquivo = est["documento"]["original"]
+    rotulo = predefinicao or formato or "arquivo"
+    ultimo = [0.0, -1]
+
+    def progresso(f: float):
+        pct = int(f * 100)
+        agora = time.time()
+        if est and pct != ultimo[1] and (agora - ultimo[0] >= 1.0 or pct >= 100):
+            ultimo[:] = [agora, pct]
+            try:
+                cliente.enviar("mensagem", texto=f"Claude: exportando {rotulo}… {pct}%", timeout=2)
+            except Exception:  # noqa: BLE001
+                pass
+
+    r = await _bg(core.exportar, arquivo, predefinicao=predefinicao, formato=formato, inicio=inicio, fim=fim,
+                  trechos=trechos, tempo=tempo, destino=destino, alvo_mb=alvo_mb, largura=largura,
+                  altura=altura, qualidade=qualidade, fps=fps, sem_audio=sem_audio, faixa=faixa,
+                  enquadramento=enquadramento, estado=est, progresso=progresso)
+    if est:
+        try:
+            cliente.enviar("mensagem", texto=f"Claude: exportado → {r['caminho']} ({r['tamanho_mb']} MB)")
+        except Exception:  # noqa: BLE001
+            pass
+    r["lembrete"] = "arquivo novo; o original e as versões não foram alterados"
+    return r
+
+
 # ---------------------------------------------------------------- versões
 @ferramenta
 async def versoes() -> dict:

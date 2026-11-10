@@ -31,12 +31,21 @@ Claude (Code/Desktop) ──stdio/MCP──> claude-player-mcp ──socket Unix
 | `core.py` | Núcleo: tempos, chamadas ao ffmpeg, versões (`Documento`), cortes precisos, filtros de áudio, faixas, metadados completos |
 | `ondas.py` | Picos de áudio (200/s) com cache em `~/.cache/claude-player/ondas` |
 | `cliente.py` | Cliente do socket (`$XDG_RUNTIME_DIR/claude-player/controle.sock`) |
-| `mcp_server.py` | Servidor MCP com 19 ferramentas; abre a janela se ela não estiver aberta |
+| `mcp_server.py` | Servidor MCP com 21 ferramentas; abre a janela se ela não estiver aberta |
+| `exportacao.py` | Painel de exportação da janela (vidro, como o de metadados): predefinição, trecho, limite em MB, destino, progresso |
 
 ### 2.2 Ferramentas MCP existentes
 `abrir`, `estado`, `controlar`, `marcar`, `mixar`, `ver_quadros`, `ver_trecho`, `metadados`, `analisar_audio`,
 `cortar`, `remover_trechos`, `montar_trechos`, `ajustar_audio`, `faixa_audio`, `ffmpeg_livre`,
-`versoes`, `desfazer`, `descartar_versoes`, `salvar`.
+`versoes`, `desfazer`, `descartar_versoes`, `salvar`, `diagnostico`, `exportar`.
+
+`exportar(predefinicao | formato, inicio/fim | trechos, tempo, destino, alvo_mb, largura, altura, qualidade, fps,
+sem_audio, faixa, enquadramento, arquivo)`: cria um arquivo novo (não é versão; não recarrega a janela) a partir da
+última versão do documento. Predefinições em `core.PREDEFINICOES` (tabela de dados): `whatsapp`, `youtube`,
+`instagram`/`reels`, `mp4`, `menor` (H.265; `menor_vp9` se faltar libx265), `webm`, `transparente` (VP9 yuva420p),
+`transparente_mov`/`prores` (ProRes 4444), `gif`, `mp3`, `m4a`, `opus`, `ogg`, `wav`, `flac`, `png`, `jpg`.
+A foto de quadro é a predefinição `png`/`jpg` com `tempo` (sem ferramenta separada). A barra de status da janela
+mostra o progresso e o caminho final.
 
 ### 2.3 Regras de versões
 - Cada edição grava `vNNN.ext` em `.<arquivo>.versoes/` ao lado do original, com `historico.json`.
@@ -72,12 +81,25 @@ Convenção: **editar** cria versões temporárias do mesmo arquivo (o original 
 - [x] Corrigir `INVALID_ENUM` do OpenGL (religar o FBO do widget após o render do mpv).
 
 ### Fase 2 — Exportar / converter
-- [ ] `exportar(formato, predefinicao, trecho?)`: arquivo novo ao lado do original (`video.whatsapp.mp4`).
-- [ ] Predefinições: WhatsApp, YouTube, Instagram/Reels, GIF, MP3, "menor tamanho", "até X MB" (2 passes).
-- [ ] Exportar só um trecho ou só os trechos marcados.
-- [ ] Exportar com transparência (WebM VP9 `yuva420p` / ProRes 4444).
-- [ ] Foto de um quadro (PNG).
-- [ ] Botão de exportar na janela, com progresso.
+- [x] `exportar(formato, predefinicao, trecho?)`: arquivo novo ao lado do original (`video.whatsapp.mp4`,
+  `video.whatsapp.2.mp4`...; quando a predefinição é a própria extensão fica `video.mp3`, `video.gif`).
+  Nunca sobrescreve (grava `.nome.parcial.ext` e publica com `link` atômico). Parte da última versão do documento.
+- [x] Predefinições: WhatsApp (720p, CRF 26 com teto VBV para caber em 16 MB quando o bitrate necessário ≥ 400 kbps),
+  YouTube, Instagram/Reels (1080x1920; horizontal → fundo desfocado por padrão, ou `recorte`/`barras`), GIF
+  (palettegen/paletteuse, 480 px, 12,5 fps = atraso exato de 8 cs), MP3/M4A/Opus/OGG/WAV/FLAC, WebM, "menor tamanho"
+  (H.265 CRF 28), "até X MB" (`alvo_mb`: 2 passes no vídeo, logs em `~/.cache/ai-editor/2passes-*` apagados ao fim;
+  CBR no áudio com taxa padrão do LAME).
+- [x] Exportar só um trecho ou vários trechos emendados (corte exato, mesmo esquema de `_cmd_preciso`).
+- [x] Exportar com transparência (WebM VP9 `yuva420p` / ProRes 4444 `yuva444p10le`). Testado com fonte com alfa 40%:
+  alfa preservado nos dois. Fonte sem alfa sai opaca (o alfa de verdade virá da Fase 7).
+- [x] Foto de um quadro (PNG/JPG): quadro exato (busca precisa meio quadro antes do quadro n; conferido por md5
+  contra `select=eq(n,N)`).
+- [x] Botão de exportar na janela (Ctrl+E), painel com predefinição, trecho (inteiro / m1→mN / cada trecho colorido),
+  tamanho máximo, destino e progresso; roda em `QThreadPool` com cancelar. Comando de socket `exportar`
+  (`acao`: abrir | iniciar | cancelar | fechar | estado).
+- Limitações: progresso do GIF fica parado até o fim (o `palettegen` precisa ver o vídeo todo); `alvo_mb` costuma
+  ficar entre 95% e 100% do alvo (x265 com margem maior); áudio de várias faixas: whatsapp/youtube/instagram exportam
+  só a A1 (`faixa=N` escolhe), mp4/webm/menor levam todas; sem mixagem das faixas na exportação.
 
 ### Fase 3 — Imagem
 - [ ] Recortar área (crop), girar, espelhar, mudar resolução.
@@ -207,6 +229,7 @@ Projeto: **GPL-3.0**.
 - 2026-11-09: IAs rodam localmente em CPU (sem LLM extra); o Claude faz o papel de "cérebro" via MCP.
 - 2026-11-10: roadmap reordenado (exportar → imagem → áudio → montagem → legendas → objetos → distribuição); `--instalar` e AppImage ficam por último.
 - 2026-11-10: "pistas de origem" são regras locais (`core._PISTAS_*`), sem IA: funcionam offline e sem o Claude conectado.
+- 2026-11-10: exportação = ferramenta única `exportar` com predefinições em tabela; foto de quadro é predefinição (`png`/`jpg`), não ferramenta separada. Instagram horizontal usa fundo desfocado por padrão. O painel da janela é uma sobreposição (como o de metadados), para aparecer no `capturar`.
 
 ## 8. Questões em aberto
 - Manter o idioma da interface em português ou adicionar i18n desde já?

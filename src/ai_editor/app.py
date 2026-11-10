@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QFileDialog, QFrame, QHB
 import qtawesome as qta
 
 from . import binarios, cliente
+from . import exportacao as _exportacao
 from . import info as _info
 from .core import CACHE_DIR, DEV, FONTE_DIR, NOME, RUNTIME_DIR, SOCKET_PATH, TITULO, Documento, fmt_tempo, parse_tempo
 from .ondas import PICOS_POR_SEG, picos
@@ -77,6 +78,8 @@ _PHOSPHOR = {
     "information-outline": "info",
     "content-copy": "copy",
     "check": "check",
+    "export": "export",
+    "close": "x",
 }
 
 
@@ -652,6 +655,8 @@ class Janela(QMainWindow):
         g_cen, cen = grupo()
         g_dir, dir_ = grupo()
         btn("folder-open-outline", "Abrir (Ctrl+O)", self.dialogo_abrir, destino=esq)
+        btn("export", "Exportar / converter: WhatsApp, GIF, MP3, foto do quadro... (Ctrl+E)",
+            self.mostrar_exportar, destino=esq)
         # botão de metadados sobre o vídeo, no canto superior esquerdo (fixo, como o contador de quadros)
         self.b_info = btn("information-outline", "Metadados do arquivo (Ctrl+I)", self.mostrar_info,
                           tam=18, papel="info_video", destino=None)
@@ -796,10 +801,12 @@ class Janela(QMainWindow):
             ("Ctrl+S", self.salvar), ("Ctrl+Z", self.desfazer),
             ("+", lambda: self.visao.zoom(0.5, self.pos)), ("-", lambda: self.visao.zoom(2, self.pos)),
             ("0", lambda: self.visao.zoom(1e9, 0)), ("F", self._tela_cheia), ("M", self._alternar_mudo_geral), ("Ctrl+G", self.editar_tempo), ("Ctrl+I", self.mostrar_info),
+            ("Ctrl+E", self.mostrar_exportar),
         ]:
             QShortcut(QKeySequence(tecla), self, fn)
 
         self.painel_info = _info.PainelMetadados(self, icone)
+        self.painel_exportar = _exportacao.PainelExportar(self, icone)
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._tick)
@@ -934,10 +941,17 @@ class Janela(QMainWindow):
         else:
             self.painel_info.abrir(self.doc.atual())
 
+    def mostrar_exportar(self):
+        if self.painel_exportar.isVisible():
+            self.painel_exportar.fechar()
+        else:
+            self.painel_exportar.abrir()
+
     def resizeEvent(self, ev):
         super().resizeEvent(ev)
-        if hasattr(self, "painel_info") and self.painel_info.isVisible():
-            self.painel_info.setGeometry(self.rect())
+        for painel in (getattr(self, "painel_info", None), getattr(self, "painel_exportar", None)):
+            if painel is not None and painel.isVisible():
+                painel.setGeometry(self.rect())
 
     def editar_tempo(self):
         """Troca o tempo do canto da régua por um campo editável já preenchido e selecionado."""
@@ -1243,6 +1257,24 @@ class Janela(QMainWindow):
             return {"arquivo": destino}
         elif cmd == "info":
             self.mostrar_info()
+        elif cmd == "exportar":
+            # painel de exportação. acao: abrir (padrão) | iniciar | cancelar | fechar | estado;
+            # predefinicao/trecho (índice no combo)/limite_mb/destino ajustam os campos antes.
+            pe = self.painel_exportar
+            acao = a.get("acao", "abrir")
+            if acao in ("abrir", "iniciar"):
+                if not pe.isVisible():
+                    pe.abrir()
+                pe.configurar(a.get("predefinicao"), a.get("trecho"), a.get("limite_mb"), a.get("destino"))
+                if acao == "iniciar":
+                    pe.iniciar()
+            elif acao == "cancelar":
+                pe.cancelar()
+            elif acao == "fechar":
+                pe.fechar()
+            elif acao != "estado":
+                raise ValueError(f"acao desconhecida: {acao}")
+            return pe.estado()
         elif cmd == "editar_tempo":
             # abre o campo de tempo do canto da régua; com "valor", digita e confirma (como Enter)
             self.editar_tempo()
@@ -1441,7 +1473,7 @@ def _tema(app: QApplication):
     if not seta.exists():
         seta.parent.mkdir(parents=True, exist_ok=True)
         icone("chevron-down", "#8b949e").pixmap(28, 28).save(str(seta))
-    app.setStyleSheet(QSS.replace("@SETA@", seta.as_posix()) + _info.QSS)
+    app.setStyleSheet(QSS.replace("@SETA@", seta.as_posix()) + _info.QSS + _exportacao.QSS)
 
 
 def main():

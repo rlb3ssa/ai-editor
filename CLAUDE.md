@@ -17,6 +17,7 @@ O spec, o roadmap e as decisões ficam em **`plano.md`** — leia antes de come�
 | `src/ai_editor/binarios.py` | Localiza ferramentas externas (env → pacote → sob demanda → sistema), diagnóstico |
 | `src/ai_editor/lixeira.py` | Lixeira freedesktop (usada no `salvar`) |
 | `src/ai_editor/info.py` | Modal de metadados (glassmorphism) |
+| `src/ai_editor/exportacao.py` | Painel de exportação (mesmo vidro); roda `core.exportar` em `QThreadPool` |
 | `src/ai_editor/cliente.py` | Cliente do socket da janela |
 | `src/ai_editor/mcp_server.py` | Servidor MCP (stdio); fala com a janela pelo socket |
 
@@ -43,7 +44,8 @@ e aparece na barra de status. Erros em tempo de execução: ver o log (stderr do
 ```
 Comandos úteis: `estado`, `depurar` (props do mpv; `extras=[...]`), `capturar` (print da janela via Qt, inclusive o vídeo, mesmo com a janela atrás de outras →
 `$XDG_RUNTIME_DIR/ai-editor-dev/captura.png`), `abrir`, `pausar`, `pular`,
-`marcar`, `zoom_video`, `editar_tempo` (com `valor`, vai ao tempo), `recarregar`, `sair`.
+`marcar`, `zoom_video`, `editar_tempo` (com `valor`, vai ao tempo), `exportar` (painel; `acao`=abrir/iniciar/
+cancelar/fechar/estado, `predefinicao`, `trecho`=índice no combo, `limite_mb`, `destino`), `recarregar`, `sair`.
 
 ## Ferramentas externas
 - **Nunca** chame `ffmpeg`/`ffprobe`/`mediainfo`/`exiftool` pelo nome solto: use `binarios.exe(nome)`,
@@ -76,6 +78,11 @@ Comandos úteis: `estado`, `depurar` (props do mpv; `extras=[...]`), `capturar` 
 - Corte preciso: uma entrada por trecho (`-ss a -t d -i arq`) + `concat` no `filter_complex`, reaplicando as
   tags das faixas (idioma/título). O modo rápido (`-c copy`) não é exato no quadro.
 - Ícones: QtAwesome, Phosphor (`ph.*`) por padrão; nomes no código são os do MDI e traduzidos em `_PHOSPHOR`.
+- Exportar ≠ editar: `core.exportar` cria arquivo novo (nunca sobrescreve; `_finalizar` usa `os.link`) e não
+  registra versão. Predefinições são dados em `core.PREDEFINICOES`. Progresso: `-progress pipe:1` (`out_time_us`).
+  Painéis sobre a janela devem ser widgets filhos (não `QDialog`), senão não aparecem no `capturar`.
+- WebM com alfa: o ffprobe (decodificador VP9 nativo) mostra `yuv420p`; o alfa está na tag `alpha_mode=1` e só
+  o `libvpx-vp9` decodifica (`ffmpeg -c:v libvpx-vp9 -i arq.webm`).
 
 ## Git
 - Trabalhe na branch **`dev`**. Commits pequenos, mensagem em português no imperativo
