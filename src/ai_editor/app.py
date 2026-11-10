@@ -650,20 +650,13 @@ class Janela(QMainWindow):
         self.l_tempo = QLabel("--:--:--.---")
         self.l_tempo.setObjectName("tempo")
         f = QFont(mono)
-        f.setPointSize(12)
+        f.setPointSize(13)
         f.setWeight(QFont.DemiBold)
         self.l_tempo.setFont(f)
         self.l_tempo.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.l_tempo.setToolTip("Posição atual (hh:mm:ss.ms)")
-        self.l_total = QLabel("/ --:--:--.---")
-        self.l_total.setObjectName("total")
-        f = QFont(mono)
-        f.setPointSize(9)
-        self.l_total.setFont(f)
-        self.l_total.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.l_total.setToolTip("Duração total")
-        lc.addWidget(self.l_tempo)
-        lc.addWidget(self.l_total)
+        # só o tempo atual; atual / total aparece ao passar o mouse
+        lc.addWidget(self.l_tempo, 0, Qt.AlignVCenter)
+        self.canto = canto
         lr.addWidget(canto)
         self.regua = Regua(self)
         lr.addWidget(self.regua, 1)
@@ -986,7 +979,10 @@ class Janela(QMainWindow):
             if not pausado:
                 self.visao.seguir(self.pos)
         self.l_tempo.setText(fmt_tempo(self.pos))
-        self.l_total.setText(f"/ {fmt_tempo(self.visao.dur)}")
+        dica = f"{fmt_tempo(self.pos)} / {fmt_tempo(self.visao.dur)}"
+        if self.l_tempo.toolTip() != dica:
+            self.l_tempo.setToolTip(dica)
+            self.canto.setToolTip(dica)
         fps = self.fps
         self.tela.mostrar_quadro(int(round(self.pos * fps)) if fps else None, fps)
         self._repintar()
@@ -1234,7 +1230,6 @@ QToolButton#salvar:hover { background: #3a80d6; }
 QToolButton#salvar:disabled { background: #262b34; color: #4a4f5a; }
 QWidget#canto { background: #0d1117; border-right: 1px solid #21262d; }
 QLabel#tempo { color: #e6edf3; }
-QLabel#total { color: #8b949e; }
 QLabel#sutil { color: #6e7681; }
 QLabel#quadro { color: #e6edf3; background: rgba(13, 17, 23, 170); border-radius: 4px; padding: 3px 7px; }
 QLabel#versao { color: #8b949e; padding-right: 6px; }
