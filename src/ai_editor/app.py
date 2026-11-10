@@ -1036,7 +1036,7 @@ class Janela(QMainWindow):
             self.lay_faixas.addWidget(self._aviso_sem_audio)
         tem_video = any(t.get("type") == "video" for t in tl)
         self.tela.setVisible(tem_video)
-        self.altura_faixa = 64 if tem_video else 150
+        self.altura_faixa = 50 if tem_video else 150
         livre = not self.isMaximized() and not self.isFullScreen()
         if not tem_video and livre:
             self.resize(self.width(), 200 + max(len(auds[:4]), 1) * 151)
@@ -1058,7 +1058,7 @@ class Janela(QMainWindow):
         self.atualizar_mix()
 
     _chave_faixas = None
-    altura_faixa = 64
+    altura_faixa = 50
 
     def _onda_pronta(self, arquivo, faixa, dados):
         if self.arquivo and str(self.arquivo) == arquivo and faixa < len(self.linhas):
