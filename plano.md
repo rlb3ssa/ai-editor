@@ -125,9 +125,12 @@ Convenção: **editar** cria versões temporárias do mesmo arquivo (o original 
 
 ### Fase 3 — Imagem
 Tudo como **versões** (mesmo mecanismo das edições existentes). Vídeo re-encodado com `codec_video` (x264 CRF 18
-`veryfast`, ou VP9 em `.webm`; 10 bits continua 10 bits), dimensões sempre pares, coordenadas no vídeo como é
-exibido (o ffmpeg aplica a rotação de metadado na entrada e a saída fica sem rotação). Edições que não mudam o
-tempo copiam áudio e legendas sem perda (tags mantidas). Código em `core.py`, seção "imagem (Fase 3)".
+`veryfast`, ou VP9 em `.webm`); origem de 10 bits ou HEVC sai em x265 (10 bits mantidos, `hvc1` em mp4) com as
+tags de cor (primárias/transferência/matriz/faixa: HDR continua HDR) e aviso na resposta. Dimensões sempre pares
+(`setsar=1`), coordenadas no vídeo como é exibido (rotação de metadado aplicada; pixels não quadrados — SAR ≠ 1,
+ex. DVD 720x576 64:45 — normalizados para 1024x576 no início do grafo). Edições que não mudam o tempo copiam
+áudio, legendas e anexos do MKV (fontes das legendas ASS) sem perda (tags mantidas); mp4 com `+faststart`.
+Código em `core.py`, seção "imagem (Fase 3)".
 - [x] Recortar área (crop), girar, espelhar, mudar resolução → `transformar_imagem`. Recorte em px ou frações 0–1,
   ou por proporção com posição; giro 90/180/270 por `transpose`, ângulo livre com `rotate` em 3 modos
   (`expandir`/`manter`/`recorte`, este com zoom mínimo calculado para não sobrar canto).
@@ -137,27 +140,36 @@ tempo copiam áudio e legendas sem perda (tags mantidas). Código em `core.py`, 
 - [x] Brilho, contraste, saturação, gama, temperatura → `ajustar_cor` (`eq` + `colortemperature`, com fallback
   `colorbalance`), opcionalmente só num trecho (`enable=between(t,a,b)`).
 - [x] Estabilizar → `estabilizar`: vid.stab em 2 passes (`vidstabdetect` → `.trf` temporário → `vidstabtransform`
-  + `unsharp`); sem vid.stab, `deshake`. Teste com vídeo tremido sintético: diferença média entre quadros
+  + `unsharp`); sem vid.stab, `deshake` (com `bordas='zoom'`: `crop` de 16 px + `scale` de volta). Teste com vídeo tremido sintético: diferença média entre quadros
   8,2 → 1,5 (vid.stab) e 6,1 (deshake).
-- [x] Câmera lenta / acelerar num trecho → `velocidade_trecho` (uma entrada `-ss/-t` por segmento + `concat`, como
-  o corte preciso — sem `split`, que acumularia quadros na memória; `setpts` + `atempo` encadeado em estágios
-  0,5–2; `manter_tom=False` usa `asetrate`; `fps` no fim volta a fps constante). Congelar quadro →
-  `congelar_quadro` (`inserir`: pausa com áudio em silêncio via `anullsrc`; `substituir`: quadro parado por cima,
-  áudio copiado). Pega o quadro exibido no tempo pedido, descontando o atraso do vídeo no contêiner (MKV com
+- [x] Câmera lenta / acelerar num trecho → `velocidade_trecho` (uma entrada `-ss/-t` por segmento, filtros de
+  `core._segmentos_av`, os mesmos do corte preciso — sem `split`, que acumularia quadros na memória; `setpts` +
+  `atempo` encadeado em estágios 0,5–2; `manter_tom=False` usa `asetrate`). Congelar quadro →
+  `congelar_quadro` (`inserir`: pausa com áudio em silêncio — a própria faixa com `volume=0,apad`, não `anullsrc`,
+  que quebra com layouts "unknown"; `substituir`: quadro parado por cima, áudio/legendas/anexos copiados).
+  Sincronia (2026-11-10, revisão): sem `PTS-STARTPTS` por faixa (preserva vídeo que começa depois do áudio); fim de
+  cada segmento por `trim`/`atrim` e não pelo `-t` (que conta do 1º quadro de cada faixa); concat de vídeo e de
+  áudio separados — áudio com duração exata (`aresample first_pts=0` + `apad`), vídeo na grade `fps` com
+  exatamente round(T_fim·fps) − round(T_ini·fps) quadros (o concat estimava o fim do vídeo como
+  último pts × n/(n−1) e cada trecho ganhava até 1 quadro; em 29,97 fps 20 trechos de 24 quadros davam 16,6 s em
+  vez de 16,02). Erro ≤ ½ quadro, sem acumular. Layouts 5.1(side)/"unknown" renomeados para o padrão
+  (`channelmap`) antes do concat. Pega o quadro exibido no tempo pedido, descontando o atraso do vídeo no contêiner (MKV com
   vídeo em 0,021 s). Conferido pelo contador do testsrc e pela frequência do tom (330 Hz mantido / 165 Hz sem tom).
 - [x] Texto → `sobrepor_texto` (`drawtext`, `expansion=none`, escape em 2 níveis em `core.esc_filtro`: aspas,
   dois-pontos, vírgula, colchetes, `;`, `\` e `%` testados na imagem; fonte DejaVu Sans via `fc-match`; reduz o
-  tamanho padrão se o texto não couber; `text_align` em várias linhas quando o ffmpeg tem, 6.1+).
-  Marca d'água → `marca_dagua` (PNG com alfa, escala, opacidade via `colorchannelmixer`, intervalo).
+  tamanho padrão se o texto não couber; `text_align` em várias linhas quando o ffmpeg tem, 6.1+; `\n` literal vira
+  quebra de linha; fonte pedida que não existe → erro, em vez de cair no padrão do fontconfig).
+  Marca d'água → `marca_dagua` (PNG com alfa, escala, opacidade via `colorchannelmixer`, intervalo; nome com `%`
+  é copiado para um temporário, senão o demuxer de imagem o leria como sequência).
 - [x] Borrar/pixelar área → `borrar_area` (`crop` + `gblur`/`pixelize` + `overlay` com `enable`); vários retângulos
   parados ou uma `trajetoria` com pontos (centro interpolado linearmente por expressão em `t` no `crop` e no
   `overlay`; tamanho = o maior dos pontos).
 - Limitações: câmera lenta duplica quadros (sem interpolação de movimento, `minterpolate` seria pesado demais);
-  velocidade/congelar descartam legendas embutidas e capítulos (avisam) e re-encodam todo o áudio; a trajetória
+  velocidade e congelar `inserir` descartam legendas embutidas e capítulos (avisam) e re-encodam todo o áudio; a trajetória
   do borrão é linear por partes e de tamanho fixo (sem rastreamento automático — fica para a Fase 7);
   marca d'água só imagem estática (GIF/vídeo como marca não); `colortemperature` é lento (~0,5× tempo real em
-  720p); pixels não quadrados (SAR ≠ 1) não são tratados no recorte (a saída sai com `setsar=1`);
-  `vidstab` leva ~2,5× a duração do vídeo. Filtros usados registrados em `binarios.RECURSOS_FFMPEG`
+  720p); `eq` e `deshake` trabalham em 8 bits (em origem de 10 bits avisam de possível banding); segmentos de
+  linha do tempo com menos de ~1,5 quadro perdem esse quadro (estimativa do concat); `vidstab` leva ~2,5× a duração do vídeo. Filtros usados registrados em `binarios.RECURSOS_FFMPEG`
   (`drawtext`, `vidstabdetect/transform`, `deshake`, `colortemperature`); vid.stab é GPL-2.0+ (ok).
 
 ### Fase 4 — Áudio prático

@@ -87,7 +87,10 @@ cancelar/fechar/estado, `predefinicao`, `trecho`=índice no combo, `limite_mb`, 
   Painéis sobre a janela devem ser widgets filhos (não `QDialog`), senão não aparecem no `capturar`.
 - Edições de imagem (Fase 3, `core.py` seção "imagem"): `_editar_quadros` (só quadros; áudio/legendas copiados)
   e `_editar_linha_tempo` (velocidade/congelar: uma entrada `-ss/-t` por segmento + `concat`; **nunca** `split` +
-  `trim` para segmentos, que guarda quadros decodificados na memória). Valores de texto/caminho/expressão no
+  `trim` para segmentos, que guarda quadros decodificados na memória). Filtros por segmento em `_segmentos_av`
+  (também usado pelo `_cmd_preciso`): nada de `PTS-STARTPTS` por faixa, fim por `trim`/`atrim` (o `-t` da entrada
+  conta do 1º quadro de cada faixa), concat de vídeo e de áudio separados, vídeo com nº exato de quadros na grade
+  `fps` (o concat estima o fim do vídeo e cada trecho ganhava até 1 quadro). Layout de canais: `_filtro_layout`. Valores de texto/caminho/expressão no
   `-filter_complex` passam por `core.esc_filtro` (2 níveis de escape; `drawtext` com `expansion=none`).
   Quadro "exibido em t": desconte o `start_time` do vídeo em relação ao do contêiner (MKV costuma ter 0,021 s).
 - WebM com alfa: o ffprobe (decodificador VP9 nativo) mostra `yuv420p`; o alfa está na tag `alpha_mode=1` e só
@@ -97,7 +100,7 @@ cancelar/fechar/estado, `predefinicao`, `trecho`=índice no combo, `limite_mb`, 
   verdade com `nf` ≈ ruído RMS + 18 dB (o default −50 quase não faz nada); perfil de ruído = trecho de pausa posto
   antes do áudio (`concat`) + `asendcmd` `sn start/stop` + `atrim`. `amix duration=first` com vídeo copiado perde
   ~85 ms do fim no ffmpeg 6.1: use `duration=longest` com as entradas já do tamanho certo. Cortes em tempos de quadro:
-  `_cmd_preciso` formata `-ss` com 3 casas (8,16667 → 8,167 perde o quadro); desconte 0,4 ms. Muitos trechos no
+  `_cmd_preciso` escreve `-ss` em µs arredondados para baixo (antes, 3 casas: 8,16667 → 8,167 perdia o quadro). Muitos trechos no
   corte preciso = muitos decodificadores abertos: lotes de 8 com `-threads 2` (`_cortar_preciso`).
 
 ## Git

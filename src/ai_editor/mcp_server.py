@@ -382,7 +382,7 @@ async def ffmpeg_livre(argumentos: str, descricao: str, extensao: str | None = N
 # ---------------------------------------------------------------- imagem
 @ferramenta
 async def transformar_imagem(recorte: list[float] | None = None, proporcao: str | None = None,
-                             posicao: str | None = None, girar: float | None = None, modo_giro: str = "expandir",
+                             posicao: str | float | None = None, girar: float | None = None, modo_giro: str = "expandir",
                              cor: str = "black", espelhar: str | None = None, largura: int | None = None,
                              altura: int | None = None, escala: float | None = None) -> dict:
     """Recorta, gira, espelha e/ou redimensiona o vídeo (nova versão). Pode combinar tudo numa chamada;
@@ -410,7 +410,7 @@ async def transformar_imagem(recorte: list[float] | None = None, proporcao: str 
 @ferramenta
 async def mudar_proporcao(proporcao: str, modo: str = "desfocado", cor: str = "black",
                           largura: int | None = None, altura: int | None = None,
-                          posicao: str | None = None) -> dict:
+                          posicao: str | float | None = None) -> dict:
     """Muda a proporção da tela (nova versão): '9:16' (vertical/Reels/TikTok), '16:9', '1:1', '4:5', '4:3'...
     modo='desfocado' (padrão): o vídeo inteiro no meio, com o próprio vídeo ampliado e desfocado no fundo;
     'barras': barras de `cor` (ex. 'black', 'white', '#202020'); 'recorte': corta as sobras (sem barras;
@@ -503,7 +503,7 @@ async def sobrepor_texto(texto: str, posicao: str | list[float] = "base", tamanh
                          contorno: int | None = None, cor_contorno: str = "black", fonte: str | None = None,
                          inicio: str | None = None, fim: str | None = None) -> dict:
     """Escreve um texto por cima do vídeo (nova versão), no vídeo todo ou só em [inicio, fim].
-    Qualquer caractere pode ser usado (aspas, dois-pontos, %, barras...); quebre linhas com \n.
+    Qualquer caractere pode ser usado (aspas, dois-pontos, %, barras...); quebre linhas com \\n (ou uma quebra de linha real).
     posicao: 'base' (padrão), 'topo', 'centro', 'esquerda', 'direita', 'sup_esq', 'sup_dir', 'inf_esq',
       'inf_dir', ou [x, y] (canto superior esquerdo do texto, em pixels ou frações 0–1).
     tamanho: altura da letra em pixels (ex. 48) ou fração da altura do vídeo (ex. 0.08); padrão ≈ 1/15 da
@@ -649,6 +649,114 @@ async def musica_fundo(arquivo: str, modo: str = "mixar", faixa: int = 1, volume
     return _apos_edicao(v, doc)
 
 
+# ---------------------------------------------------------------- montagem e análise (Fase 5)
+@ferramenta
+async def juntar_arquivos(arquivos: list[str], posicao: str = "fim", transicao: str | None = None,
+                          duracao_transicao: float = 1.0, so_audio: str = "erro", capitulos: bool = False) -> dict:
+    """Emenda outros arquivos (vídeos ou áudios do usuário) ao vídeo aberto, numa nova versão.
+    Tudo é normalizado para o formato do vídeo aberto: resolução (o que tiver outra proporção ganha barras pretas,
+    sem distorcer), fps, pixels quadrados, formato de cor, taxa de amostragem e canais do áudio. Arquivo sem áudio
+    entra com silêncio. Vídeo + arquivo só de áudio dá erro (so_audio='preto' põe tela preta com o som);
+    se o aberto for só áudio, entra só o som dos arquivos.
+    arquivos: caminhos, na ordem em que entram.
+    posicao: 'fim' (padrão) | 'inicio' | um tempo ('1:20', 'atual', 'm1'...) → divide o vídeo ali e encaixa.
+    transicao: None/'corte' (emenda seca) | 'fade' (escurece e clareia; duração total igual) |
+      'crossfade' (mistura imagem e som; cada emenda encurta o total em duracao_transicao).
+    duracao_transicao: segundos (padrão 1; no máximo metade do menor trecho).
+    capitulos=True: cria um capítulo no início de cada arquivo emendado (os capítulos existentes são mantidos).
+    Exemplos: "junta o video2.mp4 no final" → arquivos=['…/video2.mp4']; "põe a vinheta no começo com fade" →
+    posicao='inicio', transicao='fade'; "emenda os três com transição suave" → transicao='crossfade'."""
+    doc, est = _doc()
+    v = await _bg(core.juntar_arquivos, doc, arquivos, posicao=posicao, transicao=transicao,
+                  duracao_transicao=duracao_transicao, so_audio=so_audio, capitulos=capitulos, estado=est,
+                  progresso=_progresso("juntando arquivos"))
+    if str(posicao).lower() not in ("fim", "final"):
+        cliente.enviar("marcar", limpar=True)  # a linha do tempo mudou
+    return _apos_edicao(v, doc)
+
+
+@ferramenta
+async def dividir(modo: str = "marcas", intervalo_s: float | None = None, tempos: list[str] | None = None,
+                  partes: int | None = None, destino: str | None = None, rapido: bool = False) -> dict:
+    """Divide o vídeo aberto em ARQUIVOS NOVOS (como exportar: não cria versão, não altera nada, nunca
+    sobrescreve): nome.parte01.mp4, nome.parte02.mp4... ao lado do original (ou na pasta `destino`).
+    modo: 'marcas' (corta em cada marca da régua: início→m1, m1→m2, ..., última→fim) |
+      'trechos' (só os trechos coloridos entre marcas consecutivas: m1→m2, m2→m3...) |
+      'intervalo' (a cada intervalo_s segundos; ex. 600 = a cada 10 min) | 'tempos' (lista de pontos de corte) |
+      'partes' (N partes iguais).
+    rapido=False (padrão): corte exato no quadro (re-encoda). rapido=True: instantâneo e sem perda (-c copy), mas
+      cada corte cai no keyframe seguinte ao ponto pedido (a resposta mostra os pontos reais).
+    Devolve os arquivos com início/fim/duração e a soma das durações."""
+    doc, est = _doc()
+    r = await _bg(core.dividir, doc, modo=modo, intervalo_s=intervalo_s, tempos=tempos, partes=partes,
+                  destino=destino, rapido=rapido, estado=est, progresso=_progresso("dividindo"))
+    try:
+        cliente.enviar("mensagem", texto=f"Claude: {r['quantidade']} partes → {Path(r['partes'][0]['arquivo']).parent}")
+    except Exception:  # noqa: BLE001
+        pass
+    r["lembrete"] = "arquivos novos; o original e as versões não foram alterados"
+    return r
+
+
+@ferramenta
+async def detectar_cenas(limiar: float = 0.3, min_intervalo_s: float = 1.0, inicio: str | None = None,
+                         fim: str | None = None, marcar: bool = False) -> dict:
+    """Detecta cortes de cena (mudanças bruscas de imagem) no vídeo aberto: sugestões de pontos de corte.
+    Devolve os tempos com um score (0..1; maior = mudança mais forte). Analisa uma cópia reduzida (rápido:
+    ~10× o tempo real em 720p).
+    limiar: 0..1 (padrão 0.3; 0.15 = mais sensível, 0.5 = só cortes fortes). min_intervalo_s: cortes mais
+    próximos que isso viram um só (fica o mais forte). inicio/fim: analisar só esse trecho.
+    marcar=True: põe uma marca na régua em cada corte (aí dá para usar m1, m2... ou dividir(modo='marcas')).
+    Transições suaves (fade/dissolve) quase não são detectadas."""
+    est = _estado()
+    r = await _bg(core.detectar_cenas, Path(est["arquivo_tocando"]), limiar=limiar, min_intervalo_s=min_intervalo_s,
+                  inicio=inicio, fim=fim, estado=est, progresso=_progresso("procurando cortes de cena"))
+    if marcar and r["cortes"]:
+        tempos = [c["tempo"] for c in r["cortes"]][:200]
+        r["marcas"] = cliente.enviar("marcar", adicionar=tempos)
+        if len(r["cortes"]) > 200:
+            r["aviso"] = "só os 200 primeiros cortes foram marcados"
+    return r
+
+
+@ferramenta
+async def capitulos(acao: str = "listar", tempo: str | None = None, titulo: str | None = None,
+                    numero: int | None = None, itens: list | None = None) -> dict:
+    """Capítulos do vídeo aberto (aparecem na régua da janela como marcadores discretos, com o título no tooltip).
+    acao: 'listar' (padrão; não altera nada) | 'adicionar' (tempo + titulo, ou itens=[[tempo, titulo], ...]) |
+      'remover' (numero, ou itens=[n, ...]; 1 = o primeiro) | 'renomear' (numero + titulo) | 'limpar' (tira todos) |
+      'definir' (itens substitui todos).
+    Gravar cria uma nova versão SEM reencodar (instantâneo, sem perda). MP4/MOV/MKV/WebM/MP3 guardam capítulos;
+    WAV não. No MP4 o primeiro capítulo sempre começa em 0 (YouTube também exige um em 0:00).
+    Exemplos: "cria capítulo 'Introdução' aqui" → acao='adicionar', tempo='atual', titulo='Introdução';
+    "capítulos nos cortes de cena" → detectar_cenas, depois acao='definir', itens=[[0,'Início'],[t1,'Cena 2'],...]."""
+    doc, est = _doc()
+    r = await _bg(core.editar_capitulos, doc, acao=acao, tempo=tempo, titulo=titulo, numero=numero, itens=itens,
+                  estado=est)
+    if (acao or "listar").lower() == "listar" or "n" not in r:
+        return r
+    caps = r.get("capitulos")
+    out = _apos_edicao(r, doc)
+    out["capitulos"] = caps
+    return out
+
+
+@ferramenta
+async def relatorio_tecnico(arquivo: str | None = None, faixa: int = 1) -> dict:
+    """Relatório técnico do arquivo (padrão: o arquivo atual do vídeo aberto, incluindo edições não salvas):
+    contêiner, codec/perfil/nível, resolução, fps, bitrate médio e por faixa (e pico em 1 s), GOP/intervalo de
+    keyframes, VFR (fps variável), entrelaçamento (idet), pix_fmt/cor/HDR, áudio (loudness integrada LUFS, pico
+    verdadeiro, clipping), indícios de recompressão (heurísticos: bits por pixel e blocagem) e recomendações
+    ("ok para YouTube", "normalizar o áudio", "desentrelaçar"...). faixa: faixa de áudio medida (1 = A1).
+    Em arquivos longos mede por amostragem (janelas espalhadas); leva alguns segundos."""
+    if arquivo is None:
+        arquivo = _estado()["arquivo_tocando"]
+    p = Path(arquivo).expanduser().resolve()
+    if not p.exists():
+        raise FileNotFoundError(f"arquivo não encontrado: {p}")
+    return await _bg(core.relatorio_tecnico, p, faixa)
+
+
 # ---------------------------------------------------------------- exportação
 @ferramenta
 async def exportar(predefinicao: str | None = None, formato: str | None = None,
@@ -789,6 +897,174 @@ async def salvar() -> dict:
     novo = await _bg(doc.salvar)
     cliente.enviar("recarregar", arquivo=str(novo), mensagem=f"Claude: salvo em {novo}")
     return {"salvo_em": str(novo), "original_anterior": "movido para a Lixeira"}
+
+
+# ---------------------------------------------------------------- fala (Fase 6)
+def _alvo_fala(arquivo: str | None):
+    """(arquivo a transcrever, estado da janela ou None, Documento ou None). Sem `arquivo`: a versão atual do
+    vídeo aberto na janela (tempos relativos à janela valem); com `arquivo`: só segundos/'1:23'."""
+    est = _estado() if cliente.vivo() else None
+    doc_j = (est or {}).get("documento")
+    if arquivo is None:
+        if not doc_j:
+            raise RuntimeError("nenhum vídeo aberto no player; use `abrir` ou passe `arquivo`")
+        doc = Documento(doc_j["original"])
+        return doc.atual(), est, doc
+    p = Path(arquivo).expanduser().resolve()
+    if doc_j and Documento(p).original == Path(doc_j["original"]):
+        doc = Documento(doc_j["original"])
+        return (p if p != doc.original else doc.atual()), est, doc
+    return p, None, None
+
+
+def _avisos_fala(r: dict) -> dict:
+    out = {}
+    if r.get("modelo_baixado"):
+        mb = r["modelo_baixado"]
+        out["aviso_download"] = (f"primeiro uso: baixei o modelo de fala '{mb['modelo']}' ({mb['tamanho']}) para "
+                                 f"{mb['caminho']}; das próximas vezes é imediato")
+    if r.get("descartados"):
+        out["descartados"] = r["descartados"]
+    return out
+
+
+@ferramenta
+async def transcrever(idioma: str = "auto", modelo: str = "base", faixa: int = 1, inicio: str | None = None,
+                      fim: str | None = None, palavras: bool = False, arquivo: str | None = None) -> dict:
+    """Transcreve a FALA do vídeo aberto (versão atual) ou de `arquivo`, 100% local (whisper.cpp na CPU;
+    nada vai para a internet). Devolve o texto e os segmentos com tempo (segundos do arquivo inteiro).
+    idioma: 'auto' (detecta) ou 'pt', 'en', 'es'...; informar acelera e evita erro de detecção.
+    modelo: 'base' (padrão, 148 MB, bom em português), 'tiny' (78 MB, mais rápido, erra mais),
+      'small' (488 MB, mais preciso, ~3x mais lento), 'base-q5_1'/'small-q5_1' (versões compactadas).
+      O modelo é baixado sozinho no primeiro uso (a resposta avisa o tamanho).
+    faixa: faixa de áudio (1 = A1). inicio/fim: só esse trecho ('m1', '1:20', 'atual'...).
+    palavras=True: inclui cada palavra com tempo (para cortes finos).
+    Velocidade típica nesta máquina: ~0,2–0,35 s de processamento por segundo de áudio (modelo base).
+    O resultado fica em cache: chamar de novo (ou gerar_legenda/buscar_fala) não transcreve outra vez.
+    Exemplos: "o que ele fala no vídeo?" → transcrever(idioma='pt'); "transcreve só do m1 ao m2" →
+    inicio='m1', fim='m2'."""
+    from . import fala
+    alvo, est, _ = _alvo_fala(arquivo)
+    a = _t(inicio, est) if inicio is not None else None
+    b = _t(fim, est) if fim is not None else None
+    r = await _bg(fala.transcrever, alvo, idioma=idioma, modelo=modelo, faixa=faixa, inicio=a, fim=b,
+                  palavras=palavras, progresso=_progresso("transcrevendo a fala"))
+    segs = [{"inicio": s["inicio"], "fim": s["fim"], "texto": s["texto"],
+             **({"palavras": [[w["inicio"], w["fim"], w["texto"]] for w in s.get("palavras", [])]}
+                if palavras else {})} for s in r["segmentos"]]
+    res = {"arquivo": r["arquivo"], "idioma": r["idioma"], "modelo": r["modelo"],
+           "duracao_audio_s": r["duracao_audio"], "processamento_s": r["segundos_processamento"],
+           "fator_tempo_real": r["fator_tempo_real"], "do_cache": r.get("cache", False),
+           "texto": r["texto"], "segmentos": segs, **_avisos_fala(r)}
+    if not segs:
+        res["aviso"] = "nenhuma fala reconhecida (música, ruído ou silêncio?)"
+    return res
+
+
+@ferramenta
+async def gerar_legenda(formato: str = "srt", idioma: str = "auto", modelo: str = "base", faixa: int = 1,
+                        destino: str | None = None, max_caracteres: int = 42, max_linhas: int = 2,
+                        arquivo: str | None = None) -> dict:
+    """Gera arquivo de LEGENDA (.srt e/ou .vtt) a partir da fala, ARQUIVO NOVO ao lado do vídeo
+    (`video.pt.srt`; players como o mpv/VLC carregam sozinhos). Não edita o vídeo e nunca sobrescreve
+    (se existir, `video.pt.2.srt`). Transcreve localmente se ainda não houver transcrição em cache.
+    formato: 'srt' (padrão), 'vtt' ou 'ambos'. destino: pasta ou caminho do arquivo.
+    max_caracteres/max_linhas: tamanho de cada legenda (padrão 42 × 2 linhas; para vídeo vertical use
+      ~28). Duração de cada legenda entre 1 e 6 s; quebra em fim de frase e pausas.
+    Para pôr a legenda DENTRO do vídeo: `gravar_legenda` (queimada na imagem) ou `embutir_legenda`
+    (faixa que liga/desliga no player).
+    Exemplos: "gera legenda em português" → gerar_legenda(idioma='pt');
+    "quero a legenda em vtt também" → formato='ambos'."""
+    from . import fala
+    alvo, _, _ = _alvo_fala(arquivo)
+    r = await _bg(fala.gerar_legenda, alvo, formato=formato, destino=destino, idioma=idioma, modelo=modelo,
+                  faixa=faixa, max_caracteres=max_caracteres, max_linhas=max_linhas,
+                  progresso=_progresso("gerando legenda"))
+    if r.get("modelo_baixado"):
+        r.update(_avisos_fala(r))
+        del r["modelo_baixado"]
+    return r
+
+
+@ferramenta
+async def gravar_legenda(legenda: str | None = None, idioma: str = "auto", modelo: str = "base", faixa: int = 1,
+                         tamanho: float | None = None, cor: str | None = None, contorno: float | None = None,
+                         cor_contorno: str | None = None, posicao: str | None = None,
+                         margem: float | None = None, caixa: bool | None = None, cor_caixa: str | None = None,
+                         fonte: str | None = None, negrito: bool | None = None,
+                         max_caracteres: int = 42, max_linhas: int = 2) -> dict:
+    """QUEIMA a legenda na imagem do vídeo aberto (sempre visível, em qualquer player; nova versão; o áudio
+    é copiado). Sem `legenda`, transcreve a fala da versão atual e usa o resultado; com `legenda`, usa esse
+    arquivo .srt/.vtt/.ass (ex.: o gerado por `gerar_legenda` e corrigido).
+    Estilo (padrão: branco com contorno preto, embaixo, letra = 5,5% da altura, DejaVu Sans):
+      tamanho: px (ex. 40) ou fração da altura (0.07); cor / cor_contorno / cor_caixa: nome em português ou
+      inglês ('amarelo', 'white'...) ou '#RRGGBB', com '@opacidade' ('black@0.5'); contorno: px;
+      posicao: 'base' | 'topo' | 'centro'; margem: distância da borda (px ou fração);
+      caixa=True: faixa de fundo atrás do texto; fonte: nome da fonte; negrito=True.
+    Num .ass do usuário, só os parâmetros dados mudam o estilo dele.
+    Exemplos: "queima a legenda no vídeo" → gravar_legenda(idioma='pt');
+    "legenda amarela, maior, com fundo preto" → cor='amarelo', tamanho=0.07, caixa=True;
+    "grava esta legenda ~/video.pt.srt no topo" → legenda='~/video.pt.srt', posicao='topo'."""
+    from . import fala
+    doc, _ = _doc()
+    v = await _bg(fala.gravar_legenda, doc, legenda=legenda, idioma=idioma, modelo=modelo, faixa=faixa,
+                  tamanho=tamanho, cor=cor, contorno=contorno, cor_contorno=cor_contorno, posicao=posicao,
+                  margem=margem, caixa=caixa, cor_caixa=cor_caixa, fonte=fonte, negrito=negrito,
+                  max_caracteres=max_caracteres, max_linhas=max_linhas,
+                  progresso=_progresso("gravando a legenda"))
+    r = _apos_edicao(v, doc)
+    r["legenda_usada"] = v.get("legenda")
+    return r
+
+
+@ferramenta
+async def embutir_legenda(legenda: str | None = None, idioma: str = "auto", modelo: str = "base", faixa: int = 1,
+                          titulo: str | None = None, padrao: bool = True) -> dict:
+    """EMBUTE a legenda como FAIXA de legenda no arquivo (o espectador liga/desliga no player), sem
+    re-encodar vídeo nem áudio (rápido, sem perda; nova versão). MP4/MOV → mov_text; MKV → SRT (ou ASS);
+    WebM → WebVTT. Legendas que já existiam são mantidas. Sem `legenda`, transcreve a versão atual.
+    idioma: também vira a etiqueta da faixa ('pt' → por). titulo: nome da faixa (ex. 'Português').
+    padrao=True: a nova faixa aparece ligada por padrão.
+    Exemplos: "coloca a legenda no arquivo, mas que dê para desligar" → embutir_legenda(idioma='pt');
+    "embute este srt" → legenda='/caminho/video.pt.srt'."""
+    from . import fala
+    doc, _ = _doc()
+    v = await _bg(fala.embutir_legenda, doc, legenda=legenda, idioma=idioma, modelo=modelo, faixa=faixa,
+                  titulo=titulo, padrao=padrao, progresso=_progresso("embutindo a legenda"))
+    r = _apos_edicao(v, doc)
+    r["legenda_usada"] = v.get("legenda")
+    r["faixa_legenda"] = v.get("faixa_legenda")
+    return r
+
+
+@ferramenta
+async def buscar_fala(texto: str, idioma: str = "auto", modelo: str = "base", faixa: int = 1,
+                      limiar: float = 0.75, margem_s: float = 0.1, marcar_na_regua: bool = False,
+                      arquivo: str | None = None) -> dict:
+    """EDIÇÃO PELO TEXTO: acha os momentos em que a frase `texto` é dita (busca aproximada: ignora acentos,
+    maiúsculas e pontuação e tolera pequenos erros do reconhecimento). Transcreve se preciso (cache).
+    Devolve `encontrados` [{inicio, fim, texto ouvido, similaridade 0–1, contexto}] e `trechos`
+    [[inicio, fim], ...] prontos para `remover_trechos` ou `cortar`. Os tempos já incluem `margem_s`
+    de folga para dentro da pausa, sem invadir a palavra vizinha.
+    limiar: similaridade mínima (0.75; baixe para 0.6 se não achar). marcar_na_regua=True: põe marcas na
+    régua no início/fim de cada trecho achado, para o usuário conferir.
+    Fluxo: buscar_fala → (opcional: ver_trecho/mostrar ao usuário) → remover_trechos(trechos=...).
+    Exemplos: "corta a parte em que ele fala 'bom dia'" → buscar_fala(texto='bom dia') e depois
+    remover_trechos(trechos=<trechos>); "onde ele fala de preço?" → buscar_fala(texto='preço', limiar=0.8);
+    "deixa só a frase 'muito obrigado'" → buscar_fala e depois cortar(inicio=ini, fim=fim)."""
+    from . import fala
+    alvo, est, _ = _alvo_fala(arquivo)
+    tr = await _bg(fala.transcrever, alvo, idioma=idioma, modelo=modelo, faixa=faixa,
+                   progresso=_progresso("transcrevendo a fala"))
+    r = fala.buscar_fala(tr, texto, limiar=limiar, margem_s=margem_s)
+    r.update(_avisos_fala(tr))
+    if not r["encontrados"]:
+        r["aviso"] = (f"não achei '{texto}' (limiar {limiar}); tente limiar menor ou veja o texto com "
+                      f"`transcrever`")
+    elif marcar_na_regua and est:
+        cliente.enviar("marcar", adicionar=[t for par in r["trechos"] for t in par])
+        r["marcado"] = True
+    return r
 
 
 def main():
