@@ -381,6 +381,30 @@ class TelaVideo(QOpenGLWidget):
         self._arrasto = None
         self.ctx = None
         self._novo_quadro.connect(self.update, Qt.QueuedConnection)
+        # contador de quadros fixo no canto superior direito (não acompanha o zoom)
+        self.l_quadro = QLabel("", self)
+        self.l_quadro.setObjectName("quadro")
+        f = QFont("JetBrains Mono, DejaVu Sans Mono, monospace", 10)
+        f.setStyleHint(QFont.Monospace)
+        self.l_quadro.setFont(f)
+        self.l_quadro.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.l_quadro.hide()
+
+    def mostrar_quadro(self, n: int | None, fps: float = 0.0):
+        if n is None:
+            self.l_quadro.hide()
+            return
+        self.l_quadro.setText(f"Frame: {n}")
+        self.l_quadro.adjustSize()
+        self._posicionar_quadro()
+        self.l_quadro.show()
+
+    def _posicionar_quadro(self):
+        self.l_quadro.move(self.width() - self.l_quadro.width() - 10, 10)
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        self._posicionar_quadro()
 
     # ---- render API do mpv
     def initializeGL(self):
@@ -568,9 +592,6 @@ class Janela(QMainWindow):
         btn("ray-start-arrow", "Marcar entrada IN (I)", lambda: self.marcar(entrada=self.pos)).setIcon(icone("ray-start-arrow", "#ffc400"))
         btn("ray-end-arrow", "Marcar saída OUT (O)", lambda: self.marcar(saida=self.pos)).setIcon(icone("ray-end-arrow", "#ffc400"))
         sep()
-        self.l_quadro = QLabel("")
-        self.l_quadro.setObjectName("sutil")
-        bl.addWidget(self.l_quadro)
         bl.addSpacing(8)
         self.ir = QLineEdit()
         self.ir.setPlaceholderText("ir para 1:23.456")
@@ -967,8 +988,7 @@ class Janela(QMainWindow):
         self.l_tempo.setText(fmt_tempo(self.pos))
         self.l_total.setText(f"/ {fmt_tempo(self.visao.dur)}")
         fps = self.fps
-        self.l_quadro.setText(f"q{int(round(self.pos * fps))}" if fps else "")
-        self.l_quadro.setToolTip(f"quadro {int(round(self.pos * fps))} @ {fps:.3f} fps" if fps else "")
+        self.tela.mostrar_quadro(int(round(self.pos * fps)) if fps else None, fps)
         self._repintar()
 
     def _repintar(self):
@@ -1216,6 +1236,7 @@ QWidget#canto { background: #0d1117; border-right: 1px solid #21262d; }
 QLabel#tempo { color: #e6edf3; }
 QLabel#total { color: #8b949e; }
 QLabel#sutil { color: #6e7681; }
+QLabel#quadro { color: #e6edf3; background: rgba(13, 17, 23, 170); border-radius: 4px; padding: 3px 7px; }
 QLabel#versao { color: #8b949e; padding-right: 6px; }
 QLineEdit { background: #15171c; border: 1px solid #2f3540; border-radius: 6px; padding: 4px 6px; color: #c9d1d9; }
 QLineEdit:focus { border-color: #4fa3ff; }
