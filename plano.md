@@ -367,7 +367,8 @@ Módulo `src/ai_editor/fala.py` (sem Qt); ferramentas MCP na seção "fala (Fase
   alvo `whisper-cli`, estático, sem OpenMP/SDL/curl, `-j4`; ~80 s, binário de 3,2 MB em `~/.local/share/ai-editor/bin`).
   Modelos ggml multilíngues (tiny/base/small + base/small q5_1) do HF `ggerganov/whisper.cpp`, revisão fixada, SHA-256
   conferido, `.parcial` + `os.replace`, em `~/.local/share/ai-editor/modelos/whisper/`. Padrão `base`.
-  - Áudio extraído com ffmpeg para WAV 16 kHz mono (faixa escolhida, `-ss/-t` se houver trecho).
+  - Áudio extraído com ffmpeg para WAV 16 kHz mono (faixa escolhida, `-ss/-t` se houver trecho), com
+    `aresample=async=1:first_pts=0`: áudio que começa depois do contêiner ganha silêncio no início (tempos = do arquivo).
   - Tempos: o whisper sozinho arredonda os segmentos para janelas de ~4 s (medido: 0–4, 4–8...). Usamos o alinhamento
     **DTW** (`--dtw <modelo>`; exige `-nfa`, sem flash attention) com correção de atraso de 0,1 s, redistribuição de
     palavras "coladas" no mesmo instante e encaixe das bordas nas pausas medidas (`silencedetect`, limiar = volume médio
@@ -382,10 +383,35 @@ Módulo `src/ai_editor/fala.py` (sem Qt); ferramentas MCP na seção "fala (Fase
   escrito no próprio arquivo — **não** via `force_style`: a libass 0.17.1 do Ubuntu lê `Alignment` do force_style no
   formato antigo do SSA (8 = meio à esquerda), versões novas no V4+. Letra padrão = 5,5% do menor lado (vertical ok).
   `embutir_legenda` cria faixa soft sem reencodar.
-- [x] Edição pelo texto (`buscar_fala` → `remover_trechos`). Busca aproximada (difflib sobre palavras normalizadas,
-  janelas de n−2 a n+2 palavras). Bordas: com pausa, folga `margem_s` dentro da pausa; fala emendada, o vale de energia
+- [x] Edição pelo texto (`buscar_fala` → `remover_trechos`). Busca aproximada (difflib sobre palavras normalizadas;
+  janela com o mesmo nº de palavras para buscas de 1–2 palavras, ±25% nas maiores; palavras de até 4 letras precisam
+  aparecer iguais). Bordas: com pausa, folga `margem_s` dentro da pausa; fala emendada, o vale de energia
   mais próximo (±0,1 s, quadros de 10 ms). Teste: 8 cortes em fala sintética contínua, 7 palavras vizinhas afetadas
   (sem o refinamento: 8) — em fala emendada pode sobrar/faltar uma sílaba; confira com `ver_trecho`.
+- [x] Correções da revisão (2026-11-10), reproduzidas antes e medidas depois (scripts em `scratchpad/revisao_f6`):
+  - Áudio atrasado (faixa em 1,979 s): segmentos saíam em 1,06/5,29 s (sem o atraso); agora 3,04/7,27 s (pausa medida:
+    3,04 s), também com `inicio`/`fim`. `_vale` do `buscar_fala` recebeu a mesma correção.
+  - `buscar_fala`: 'não' casava "no"/"ao" (0,8) e 'arte' casava "até"/"parte"; agora nada. Frases continuam achadas
+    (0,94–1,0), inclusive "o programa é leve" reconhecido como "releve".
+  - Cache: arquivos ≤ 256 MB usam o SHA-256 do conteúdo todo; maiores, amostras + mtime_ns + caminho (antes, um WAV
+    editado com o mesmo tamanho dava a mesma chave). Chave inclui a versão REAL do whisper-cli (`--version`: 1.9.5-dev).
+    Com `idioma='auto'` a transcrição também fica sob a chave do idioma detectado ('auto' seguido de 'pt' agora é cache).
+  - MCP: parâmetros de tempo de todas as ferramentas aceitam número (`str | float`); antes `remover_trechos` recusava os
+    `trechos` numéricos que o próprio `buscar_fala` devolve.
+  - `embutir_legenda`: mantém a capa (attached_pic) e fluxos de dados do MP4/MOV (menos `tmcd` e a trilha de capítulos,
+    que o muxer recria); `titulo` vira também `handler_name` no MP4.
+  - Legendas: `.srt`/`.vtt` são lidos por `ler_legenda` e escritos como ASS pelo próprio módulo, com `\`, `{` e `}`
+    escapados (antes `{nota}` sumia e `c:\nova\Npasta` quebrava linha); `{\anN}` no começo continua valendo; `fonte` com
+    vírgula/quebra de linha é recusada (injetava Dialogue). SRT: `-->` no texto vira `->`; VTT: `&`, `<`, `>` escapados.
+    Legenda curta antes de outra não sobrepõe mais (era `max(início+0,2, próx−0,04)`).
+  - HDR: PQ/HLG têm as cores do estilo escaladas para o branco ficar em ~203 nits (PQ: sinal 0,586 medido; antes 1,0).
+  - Robustez: idioma validado contra a lista do Whisper (antes 'xx' dava `FileNotFoundError` do JSON; se o JSON faltar,
+    o erro mostra o fim do stderr); `inicio` < 0 vira 0 (antes saíam tempos negativos); duração do WAV pelo cabeçalho;
+    idioma da legenda reconhecido em `video.pt-BR.srt` e `video.pt.2.srt`; disco cheio tem mensagem própria.
+  - Processos: ffmpeg da transcrição com `PR_SET_PDEATHSIG` (antes ficava órfão se o processo morresse); um whisper-cli
+    por vez (`flock` em `~/.cache/ai-editor/whisper.lock`); pastas `/tmp/ai-editor-fala-<pid>-*` com mais de 1 h de
+    processo morto são apagadas. Compilação: trava, pasta `mkdtemp` própria, `.parcial` único e limpeza em erro;
+    `uvx --from cmake==4.4.4`. `modelo_pronto` confere o SHA-256 uma vez e grava `.ggml-*.bin.ok` (tamanho+mtime).
 - Limitações: testado só com fala sintética (piper, voz pt_BR faber) e a amostra jfk.wav (inglês); sem diarização
   (quem fala); VAD do whisper.cpp (Silero) avaliado e não usado (os tempos de token/DTW não são remapeados com VAD).
   O binário é compilado com `GGML_NATIVE` (otimizado para a CPU local): para o AppImage, compilar sem nativo ou

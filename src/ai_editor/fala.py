@@ -16,8 +16,13 @@ de `core` (`_editar_quadros`, `_rodar_versao`): cada uma cria uma versão vNNN d
 """
 from __future__ import annotations
 
+import contextlib
 import difflib
+import functools
+import errno
+import fcntl
 import hashlib
+import html
 import json
 import os
 import re
@@ -31,6 +36,7 @@ import threading
 import time
 import unicodedata
 import urllib.request
+import wave
 from pathlib import Path
 
 from . import binarios, core
@@ -63,7 +69,14 @@ MODELO_PADRAO = "base"
 
 MODELOS_WHISPER_DIR = binarios.MODELOS_DIR / "whisper"
 CACHE_TRANSCRICOES = core.CACHE_DIR / "transcricoes"
-_VERSAO_CACHE = 1  # muda se o formato do resultado mudar
+_VERSAO_CACHE = 2  # muda se o formato/cálculo do resultado mudar (2: áudio atrasado em relação ao contêiner)
+_CMAKE_PIP = "cmake==4.4.4"  # versão do pacote pip `cmake` (via uvx) com que o build foi testado
+
+# idiomas que o Whisper conhece (lista de whisper.cpp/whisper.h, g_lang)
+_IDIOMAS_WHISPER = set(
+    "en zh de es ru ko fr ja pt tr pl ca nl ar sv it id hi fi vi he uk el ms cs ro da hu ta no th ur hr bg lt la "
+    "mi ml cy sk te fa lv bn sr az sl kn et mk br eu is hy ne mn bs kk sq sw gl mr pa si km sn yo so af oc ka be "
+    "tg sd gu am yi lo uz fo ht ps tk nn mt sa lb my bo tl mg as tt haw ln ha ba jw su yue".split())
 
 # idioma (como o usuário/Claude escreve) → código do whisper
 _IDIOMAS = {
@@ -94,9 +107,11 @@ def norm_idioma(idioma: str | None) -> str:
     s = str(idioma or "auto").strip().lower()
     if s in _IDIOMAS:
         return _IDIOMAS[s]
-    if re.fullmatch(r"[a-z]{2}", s):
-        return s
-    raise ValueError(f"idioma desconhecido: {idioma!r}. Use 'auto', 'pt', 'en', 'es'... (código de 2 letras)")
+    base = re.split(r"[-_]", s)[0]  # 'en-us' → 'en'
+    if base in _IDIOMAS_WHISPER:
+        return base
+    raise ValueError(f"idioma desconhecido para o Whisper: {idioma!r}. Use 'auto' ou um código como 'pt', 'en', "
+                     f"'es', 'fr', 'de', 'it', 'ja', 'zh' (lista: {' '.join(sorted(_IDIOMAS_WHISPER))})")
 
 
 def norm_modelo(modelo: str | None) -> str:
@@ -146,6 +161,32 @@ def _baixar(url: str, final: Path, sha256: str, tamanho: int | None = None, prog
     return final
 
 
+def _disco_cheio(e: BaseException) -> bool:
+    return getattr(e, "errno", None) in (errno.ENOSPC, errno.EDQUOT) or (
+        isinstance(getattr(e, "reason", None), OSError) and e.reason.errno in (errno.ENOSPC, errno.EDQUOT))
+
+
+def _msg_disco_cheio(pasta: Path, precisa: int | None = None) -> str:
+    try:
+        livre = shutil.disk_usage(pasta if pasta.exists() else pasta.parent).free
+    except OSError:
+        livre = None
+    return ("disco cheio em " + str(pasta) + (f" (livre: {_mb(livre)}" if livre is not None else " (")
+            + (f", precisa de ~{_mb(precisa)})" if precisa else ")") + ". Libere espaço e tente de novo")
+
+
+@contextlib.contextmanager
+def _trava(nome: str):
+    """Trava exclusiva entre processos (fcntl.flock) em ~/.cache/ai-editor/<nome>.lock; espera a vez."""
+    core.CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    with open(core.CACHE_DIR / f"{nome}.lock", "a") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
 def _limpar_parciais(pasta: Path, idade_s: float = 3600) -> None:
     if not pasta.is_dir():
         return
@@ -163,8 +204,33 @@ def caminho_modelo(modelo: str = MODELO_PADRAO) -> Path:
 
 
 def modelo_pronto(modelo: str = MODELO_PADRAO) -> bool:
-    p = caminho_modelo(modelo)
-    return p.is_file() and p.stat().st_size == MODELOS[norm_modelo(modelo)][1]
+    """Modelo presente e íntegro. O SHA-256 é conferido UMA vez (~0,3 s para o base) e fica registrado num
+    marcador `.<arquivo>.ok` com tamanho, mtime e hash; depois basta comparar tamanho/mtime com o marcador."""
+    nome = norm_modelo(modelo)
+    arq, tam, sha, _ = MODELOS[nome]
+    p = caminho_modelo(nome)
+    try:
+        st = p.stat()
+    except OSError:
+        return False
+    if st.st_size != tam:
+        return False
+    ok = p.with_name(f".{p.name}.ok")
+    assinatura = f"{st.st_size} {st.st_mtime_ns} {sha}"
+    try:
+        if ok.read_text().strip() == assinatura:
+            return True
+    except OSError:
+        pass
+    h = hashlib.sha256()
+    with open(p, "rb") as f:
+        while bloco := f.read(1 << 22):
+            h.update(bloco)
+    if h.hexdigest() != sha:
+        return False  # corrompido/alterado: baixar_modelo baixa de novo (o .parcial substitui atomicamente)
+    with contextlib.suppress(OSError):
+        ok.write_text(assinatura + "\n")
+    return True
 
 
 def baixar_modelo(modelo: str = MODELO_PADRAO, progresso=None) -> tuple[Path, bool]:
@@ -178,6 +244,9 @@ def baixar_modelo(modelo: str = MODELO_PADRAO, progresso=None) -> tuple[Path, bo
     try:
         _baixar(HF_BASE + arq, final, sha, tam, progresso, f"modelo {nome}")
     except OSError as e:
+        if _disco_cheio(e):
+            raise FalaIndisponivel(f"não consegui baixar o modelo '{nome}': "
+                                   + _msg_disco_cheio(MODELOS_WHISPER_DIR, tam)) from e
         raise FalaIndisponivel(f"não consegui baixar o modelo '{nome}' ({_mb(tam)}) de {HF_BASE + arq}: {e}. "
                                f"Sem internet? Baixe manualmente para {final}") from e
     return final, True
@@ -198,6 +267,48 @@ def whisper_cli() -> str:
 
 
 # ---------------------------------------------------------------- compilar o whisper.cpp
+def _preexec():
+    """preexec_fn que faz o filho morrer junto com quem o criou (PR_SET_PDEATHSIG), como no core."""
+    return core._morrer_com_pai if core._prctl is not None else None
+
+
+def _rodar_ff(cmd: list[str], texto: bool = True, timeout: float | None = None) -> subprocess.CompletedProcess:
+    """Como core.rodar, mas o ffmpeg morre junto se o processo/thread do MCP morrer (sem órfãos)."""
+    r = subprocess.run(cmd, capture_output=True, text=texto, timeout=timeout, preexec_fn=_preexec())
+    if r.returncode != 0:
+        err = r.stderr if texto else r.stderr.decode(errors="replace")
+        if "No space left on device" in err:
+            raise OSError(errno.ENOSPC, _msg_disco_cheio(Path(cmd[-1]).parent))
+        raise core.ErroFFmpeg(f"comando falhou ({r.returncode}): {shlex.join(cmd)}\n{err[-4000:]}")
+    return r
+
+
+@functools.lru_cache(maxsize=8)
+def _versao_motor_de(caminho: str, mtime_ns: int) -> str:
+    try:
+        r = subprocess.run([caminho, "--version"], capture_output=True, text=True, timeout=15)
+        m = re.search(r"version:\s*([\w.\-]+)", r.stdout + r.stderr)
+        return m.group(1) if m else "?"
+    except (OSError, subprocess.SubprocessError):
+        return "?"
+
+
+def _versao_motor(exe: str | None = None) -> str:
+    """Versão REAL do whisper-cli em uso (ex. '1.9.5-dev'), não a fixada no código: entra na chave do cache
+    (um whisper-cli trocado por AI_EDITOR_WHISPER_CLI ou recompilado não reaproveita transcrições antigas)."""
+    exe = exe or binarios.localizar("whisper-cli")
+    if not exe:
+        return "?"
+    try:
+        st = os.stat(exe)
+    except OSError:
+        return "?"
+    return _versao_motor_de(str(Path(exe).resolve()), st.st_mtime_ns)
+
+
+_versao_motor.cache_clear = _versao_motor_de.cache_clear
+
+
 def _cmake() -> list[str]:
     c = shutil.which("cmake")
     if c:
@@ -205,7 +316,7 @@ def _cmake() -> list[str]:
     uvx = shutil.which("uvx") or (str(Path.home() / ".local/bin/uvx") if (Path.home() / ".local/bin/uvx").exists()
                                   else None)
     if uvx:
-        return [uvx, "--from", "cmake>=3.20,<5", "cmake"]
+        return [uvx, "--from", _CMAKE_PIP, "cmake"]
     raise FalaIndisponivel("para compilar o whisper.cpp falta o cmake: `sudo apt install cmake` "
                            "(ou instale o uv, que baixa o cmake do PyPI sem sudo)")
 
@@ -213,45 +324,74 @@ def _cmake() -> list[str]:
 def compilar_whisper(progresso=None, jobs: int | None = None, log=print) -> Path:
     """Baixa o código-fonte do whisper.cpp WHISPER_VERSAO (SHA-256 conferido), compila só o whisper-cli
     (estático, sem OpenMP/SDL/curl; otimizado para este processador) e instala em BIN_SOB_DEMANDA.
-    Sem sudo. Pasta de trabalho em ~/.cache/ai-editor-build/whisper.cpp (apagada no fim)."""
+    Sem sudo. Pasta de trabalho própria (mkdtemp) em ~/.cache/ai-editor-build/ (apagada no fim, mesmo com erro).
+    Duas instalações ao mesmo tempo: a segunda espera a primeira (trava) e reaproveita o resultado."""
     for f in ("g++", "make"):
         if not shutil.which(f):
             raise FalaIndisponivel(f"para compilar o whisper.cpp falta o {f}: `sudo apt install build-essential`")
     cmake = _cmake()
-    trab = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "ai-editor-build" / "whisper.cpp"
-    shutil.rmtree(trab, ignore_errors=True)
-    trab.mkdir(parents=True)
-    try:
-        tar = trab / f"whisper.cpp-{WHISPER_VERSAO}.tar.gz"
-        log(f"baixando {WHISPER_TARBALL}")
-        _baixar(WHISPER_TARBALL, tar, WHISPER_TARBALL_SHA256, None, None, "código-fonte do whisper.cpp")
-        with tarfile.open(tar) as t:
-            t.extractall(trab / "fonte", filter="data")
-        fonte = next((trab / "fonte").iterdir())
-        build = trab / "build"
-        log("configurando (cmake)")
-        subprocess.run(cmake + ["-S", str(fonte), "-B", str(build), "-DCMAKE_BUILD_TYPE=Release",
-                                "-DBUILD_SHARED_LIBS=OFF", "-DGGML_OPENMP=OFF", "-DWHISPER_BUILD_TESTS=OFF",
-                                "-DWHISPER_BUILD_SERVER=OFF", "-DWHISPER_SDL2=OFF", "-DWHISPER_CURL=OFF"],
-                       check=True, capture_output=True, text=True)
-        j = jobs or max(1, min(4, os.cpu_count() or 1))  # 4 jobs: pico de RAM ~1 GB
-        log(f"compilando com {j} processos (1–2 min)")
-        r = subprocess.run(cmake + ["--build", str(build), "--config", "Release", "--target", "whisper-cli",
-                                    "-j", str(j)], capture_output=True, text=True)
-        if r.returncode != 0:
-            raise RuntimeError("falha ao compilar o whisper.cpp:\n" + (r.stdout + r.stderr)[-3000:])
-        exe = build / "bin" / "whisper-cli"
-        binarios.BIN_SOB_DEMANDA.mkdir(parents=True, exist_ok=True)
-        destino = binarios.BIN_SOB_DEMANDA / "whisper-cli"
-        tmp = destino.with_name(".whisper-cli.parcial")
-        shutil.copy2(exe, tmp)
-        os.chmod(tmp, 0o755)
-        os.replace(tmp, destino)
-        (binarios.BIN_SOB_DEMANDA / "whisper-cli.versao").write_text(
-            f"whisper.cpp {WHISPER_VERSAO}\nfonte: {WHISPER_TARBALL}\nsha256: {WHISPER_TARBALL_SHA256}\n")
-    finally:
-        shutil.rmtree(trab, ignore_errors=True)
+    raiz = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "ai-editor-build"
+    raiz.mkdir(parents=True, exist_ok=True)
+    destino = binarios.BIN_SOB_DEMANDA / "whisper-cli"
+    marcador = binarios.BIN_SOB_DEMANDA / "whisper-cli.versao"
+    t_pedido = time.time()
+    with _trava("compilar-whisper"):
+        if (destino.is_file() and marcador.is_file() and marcador.stat().st_mtime >= t_pedido
+                and f"whisper.cpp {WHISPER_VERSAO}\n" in marcador.read_text()):
+            log(f"já instalado (por outro processo): {destino}")
+            binarios.localizar_com_origem.cache_clear()
+            return destino
+        trab = Path(tempfile.mkdtemp(prefix="whisper.cpp-", dir=raiz))
+        tmp = None
+        try:
+            tar = trab / f"whisper.cpp-{WHISPER_VERSAO}.tar.gz"
+            log(f"baixando {WHISPER_TARBALL}")
+            try:
+                _baixar(WHISPER_TARBALL, tar, WHISPER_TARBALL_SHA256, None, None, "código-fonte do whisper.cpp")
+            except OSError as e:
+                if _disco_cheio(e):
+                    raise FalaIndisponivel("não consegui baixar o whisper.cpp: " + _msg_disco_cheio(raiz)) from e
+                raise
+            with tarfile.open(tar) as t:
+                t.extractall(trab / "fonte", filter="data")
+            fonte = next((trab / "fonte").iterdir())
+            build = trab / "build"
+            log("configurando (cmake)")
+            r = subprocess.run(cmake + ["-S", str(fonte), "-B", str(build), "-DCMAKE_BUILD_TYPE=Release",
+                                        "-DBUILD_SHARED_LIBS=OFF", "-DGGML_OPENMP=OFF", "-DWHISPER_BUILD_TESTS=OFF",
+                                        "-DWHISPER_BUILD_SERVER=OFF", "-DWHISPER_SDL2=OFF", "-DWHISPER_CURL=OFF"],
+                               capture_output=True, text=True, preexec_fn=_preexec())
+            if r.returncode != 0:
+                raise RuntimeError("falha ao configurar o whisper.cpp (cmake):\n" + (r.stdout + r.stderr)[-3000:])
+            j = jobs or max(1, min(4, os.cpu_count() or 1))  # 4 jobs: pico de RAM ~1 GB
+            log(f"compilando com {j} processos (1–2 min)")
+            r = subprocess.run(cmake + ["--build", str(build), "--config", "Release", "--target", "whisper-cli",
+                                        "-j", str(j)], capture_output=True, text=True, preexec_fn=_preexec())
+            if r.returncode != 0:
+                saida = r.stdout + r.stderr
+                if "No space left on device" in saida:
+                    raise FalaIndisponivel("falha ao compilar o whisper.cpp: " + _msg_disco_cheio(raiz))
+                raise RuntimeError("falha ao compilar o whisper.cpp:\n" + saida[-3000:])
+            exe = build / "bin" / "whisper-cli"
+            binarios.BIN_SOB_DEMANDA.mkdir(parents=True, exist_ok=True)
+            fd, tmp = tempfile.mkstemp(prefix=".whisper-cli.", suffix=".parcial", dir=binarios.BIN_SOB_DEMANDA)
+            os.close(fd)
+            shutil.copy2(exe, tmp)
+            os.chmod(tmp, 0o755)
+            os.replace(tmp, destino)
+            tmp = None
+            marcador.write_text(f"whisper.cpp {WHISPER_VERSAO}\nfonte: {WHISPER_TARBALL}\n"
+                                f"sha256: {WHISPER_TARBALL_SHA256}\n")
+        except OSError as e:
+            if _disco_cheio(e):
+                raise FalaIndisponivel("falha ao compilar o whisper.cpp: " + _msg_disco_cheio(raiz)) from e
+            raise
+        finally:
+            if tmp:
+                Path(tmp).unlink(missing_ok=True)
+            shutil.rmtree(trab, ignore_errors=True)
     binarios.localizar_com_origem.cache_clear()
+    _versao_motor.cache_clear()
     log(f"instalado: {destino}")
     return destino
 
@@ -264,43 +404,67 @@ def status() -> dict:
 
 
 # ---------------------------------------------------------------- transcrição
+_HASH_COMPLETO_ATE = 256 << 20  # arquivos até 256 MB: hash do conteúdo todo (~0,3 s)
+
+
 def _impressao_arquivo(p: Path) -> str:
-    """Identidade do conteúdo sem ler o arquivo todo: tamanho + 3 blocos de 4 MB (início, meio, fim)."""
-    tam = p.stat().st_size
+    """Identidade do conteúdo para o cache. Até 256 MB: SHA-256 do arquivo inteiro (vale mesmo se o arquivo for
+    copiado/renomeado). Maior: tamanho + 3 blocos de 4 MB (início, meio, fim) + mtime_ns + caminho — uma edição
+    que mantém o tamanho e não toca nos blocos amostrados muda o mtime."""
+    st = p.stat()
+    tam = st.st_size
     h = hashlib.sha256(str(tam).encode())
-    bloco = 4 << 20
     with open(p, "rb") as f:
+        if tam <= _HASH_COMPLETO_ATE:
+            while bloco := f.read(1 << 22):
+                h.update(bloco)
+            return h.hexdigest()
+        bloco = 4 << 20
         for pos in sorted({0, max(0, tam // 2 - bloco // 2), max(0, tam - bloco)}):
             f.seek(pos)
             h.update(f.read(bloco))
+    h.update(f"|{st.st_mtime_ns}|{p.resolve()}".encode())
     return h.hexdigest()
+
+
+def _duracao_wav(wav: Path) -> float:
+    """Duração pelo cabeçalho do WAV (o ffmpeg grava um bloco LIST antes dos dados: tamanho − 44 erra)."""
+    try:
+        with wave.open(str(wav), "rb") as w:
+            return w.getnframes() / float(w.getframerate() or 16000)
+    except (wave.Error, EOFError, OSError):
+        return max(0.0, (wav.stat().st_size - 44) / 32000)
 
 
 def extrair_audio(arquivo: Path, destino: Path, faixa: int = 1, inicio: float | None = None,
                   fim: float | None = None) -> float:
-    """WAV 16 kHz mono PCM (o que o whisper espera) da faixa `faixa` (1 = A1). Devolve a duração."""
+    """WAV 16 kHz mono PCM (o que o whisper espera) da faixa `faixa` (1 = A1). Devolve a duração.
+    O instante 0 do WAV é o instante `inicio` (ou 0) do ARQUIVO: se a faixa começa depois do contêiner (áudio
+    atrasado, start_time > 0), o começo é preenchido com silêncio (`aresample=async=1:first_pts=0`); sem isso
+    os tempos sairiam adiantados pelo atraso da faixa."""
     probe = core.ffprobe(arquivo)
     auds = core.faixas_audio(probe)
     if not auds:
         raise ValueError(f"o arquivo não tem áudio: {arquivo.name}")
     if not 1 <= int(faixa) <= len(auds):
         raise ValueError(f"faixa A{faixa} não existe (o arquivo tem {len(auds)} faixa(s) de áudio)")
+    inicio = max(0.0, float(inicio)) if inicio else None
     cmd = list(core.FFMPEG)
     if inicio:
         cmd += ["-ss", f"{inicio:.3f}"]
     if fim is not None:
         cmd += ["-t", f"{max(0.01, fim - (inicio or 0)):.3f}"]
-    cmd += ["-i", str(arquivo), "-map", f"0:a:{int(faixa) - 1}", "-vn", "-sn", "-dn", "-ac", "1", "-ar", "16000",
-            "-c:a", "pcm_s16le", str(destino)]
-    core.rodar(cmd)
-    return max(0.0, (destino.stat().st_size - 44) / 32000)
+    cmd += ["-i", str(arquivo), "-map", f"0:a:{int(faixa) - 1}", "-vn", "-sn", "-dn",
+            "-af", "aresample=async=1:first_pts=0", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(destino)]
+    _rodar_ff(cmd)
+    return _duracao_wav(destino)
 
 
 def _rodar_whisper(cmd: list[str], progresso=None) -> str:
     """Roda o whisper-cli lendo o progresso ('progress = N%') do stderr; devolve o stderr (para erros)."""
     linhas: list[str] = []
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, errors="replace",
-                            preexec_fn=core._morrer_com_pai if core._prctl is not None else None)
+                            preexec_fn=_preexec())
     try:
         for linha in proc.stderr:
             linhas.append(linha)
@@ -416,14 +580,15 @@ def _espalhar_colados(ws: list[dict]) -> None:
 def _silencios(wav: Path) -> list[tuple[float, float]]:
     """Pausas do WAV (silencedetect), com limiar relativo ao volume médio (−18 dB, entre −50 e −30 dBFS)."""
     r = subprocess.run([core.FFMPEG[0], "-hide_banner", "-nostdin", "-i", str(wav), "-af", "volumedetect",
-                        "-f", "null", "-"], capture_output=True, text=True)
+                        "-f", "null", "-"], capture_output=True, text=True, preexec_fn=_preexec())
     m = re.search(r"mean_volume:\s*(-?[\d.]+) dB", r.stderr)
     limiar = max(-50.0, min(-30.0, float(m.group(1)) - 18)) if m else -40.0
     r = subprocess.run([core.FFMPEG[0], "-hide_banner", "-nostdin", "-i", str(wav), "-af",
-                        f"silencedetect=n={limiar:.1f}dB:d=0.25", "-f", "null", "-"], capture_output=True, text=True)
+                        f"silencedetect=n={limiar:.1f}dB:d=0.25", "-f", "null", "-"], capture_output=True, text=True,
+                       preexec_fn=_preexec())
     ini = [float(x) for x in re.findall(r"silence_start:\s*(-?[\d.]+)", r.stderr)]
     fim = [float(x) for x in re.findall(r"silence_end:\s*(-?[\d.]+)", r.stderr)]
-    dur = max(0.0, (wav.stat().st_size - 44) / 32000)
+    dur = _duracao_wav(wav)
     return [(max(0.0, a), fim[i] if i < len(fim) else dur) for i, a in enumerate(ini)]
 
 
@@ -453,6 +618,31 @@ def _ajustar_silencios(segs: list[dict], silencios: list[tuple[float, float]], d
             s["fim"] = s["palavras"][-1]["fim"]
 
 
+_PREFIXO_TMP = "ai-editor-fala-"
+
+
+def _limpar_orfaos_tmp(idade_s: float = 3600) -> None:
+    """Apaga pastas temporárias de transcrições (ai-editor-fala-<pid>-*) com mais de 1 h cujo processo já
+    morreu (MCP morto no meio de uma transcrição não passa pelo `finally` do TemporaryDirectory)."""
+    agora = time.time()
+    for d in Path(tempfile.gettempdir()).glob(f"{_PREFIXO_TMP}*"):
+        try:
+            if not d.is_dir() or agora - d.stat().st_mtime < idade_s:
+                continue
+            m = re.match(rf"{_PREFIXO_TMP}(\d+)-", d.name)
+            if m:
+                try:
+                    os.kill(int(m.group(1)), 0)
+                    continue  # processo vivo: não mexe
+                except ProcessLookupError:
+                    pass
+                except PermissionError:
+                    continue
+            shutil.rmtree(d, ignore_errors=True)
+        except OSError:
+            pass
+
+
 def transcrever(arquivo: Path | str, idioma: str = "auto", modelo: str = MODELO_PADRAO, faixa: int = 1,
                 inicio: float | None = None, fim: float | None = None, palavras: bool = True,
                 threads: int | None = None, usar_cache: bool = True, progresso=None) -> dict:
@@ -472,12 +662,21 @@ def transcrever(arquivo: Path | str, idioma: str = "auto", modelo: str = MODELO_
         raise FileNotFoundError(f"arquivo não encontrado: {arquivo}")
     lang = norm_idioma(idioma)
     nome = norm_modelo(modelo)
+    if inicio is not None:
+        inicio = max(0.0, float(inicio))
     if inicio is not None and fim is not None and fim - inicio <= 0.05:
         raise ValueError(f"intervalo vazio: {fmt_tempo(inicio)} → {fmt_tempo(fim)}")
-    params = {"v": _VERSAO_CACHE, "whisper": WHISPER_VERSAO, "idioma": lang, "modelo": nome, "faixa": int(faixa),
-              "inicio": round(inicio, 3) if inicio else None, "fim": round(fim, 3) if fim is not None else None}
-    chave = hashlib.sha256((_impressao_arquivo(arquivo) + json.dumps(params, sort_keys=True)).encode()).hexdigest()
-    cache = CACHE_TRANSCRICOES / f"{chave[:40]}.json"
+    exe = whisper_cli()  # erro claro antes de baixar o modelo
+    impressao = _impressao_arquivo(arquivo)
+
+    def arq_cache(idioma_chave: str) -> Path:
+        params = {"v": _VERSAO_CACHE, "whisper": _versao_motor(exe), "idioma": idioma_chave, "modelo": nome,
+                  "faixa": int(faixa), "inicio": round(inicio, 3) if inicio else None,
+                  "fim": round(fim, 3) if fim is not None else None}
+        chave = hashlib.sha256((impressao + json.dumps(params, sort_keys=True)).encode()).hexdigest()
+        return CACHE_TRANSCRICOES / f"{chave[:40]}.json"
+
+    cache = arq_cache(lang)
     if usar_cache and cache.is_file():
         try:
             r = json.loads(cache.read_text())
@@ -490,7 +689,6 @@ def transcrever(arquivo: Path | str, idioma: str = "auto", modelo: str = MODELO_
         except (OSError, ValueError):
             pass
 
-    exe = whisper_cli()  # erro claro antes de baixar o modelo
     baixado = None
     if not modelo_pronto(nome):
         caminho, _ = baixar_modelo(nome, (lambda f: progresso(0.3 * f)) if progresso else None)
@@ -500,7 +698,8 @@ def transcrever(arquivo: Path | str, idioma: str = "auto", modelo: str = MODELO_
         base = 0.0
     caminho = caminho_modelo(nome)
     t0 = time.monotonic()
-    with tempfile.TemporaryDirectory(prefix="ai-editor-fala-") as tmp:
+    _limpar_orfaos_tmp()
+    with tempfile.TemporaryDirectory(prefix=f"{_PREFIXO_TMP}{os.getpid()}-") as tmp:
         wav = Path(tmp) / "audio.wav"
         dur = extrair_audio(arquivo, wav, faixa, inicio, fim)
         if progresso:
@@ -514,8 +713,14 @@ def transcrever(arquivo: Path | str, idioma: str = "auto", modelo: str = MODELO_
                # alinhamento DTW: tempo das palavras bem melhor (o whisper sozinho arredonda os segmentos para
                # janelas de ~4 s); o DTW não funciona com flash attention (-nfa), que viria ligada por padrão
                "--dtw", MODELOS[nome][3], "-nfa"]
-        _rodar_whisper(cmd, (lambda f: progresso(base + 0.03 + (0.97 - base) * f)) if progresso else None)
-        bruto = (saida.with_suffix(".json")).read_bytes()
+        # um whisper-cli por vez na máquina (~0,4–1 GB de RAM e 4 threads cada): os outros esperam a vez
+        with _trava("whisper"):
+            err = _rodar_whisper(cmd, (lambda f: progresso(base + 0.03 + (0.97 - base) * f)) if progresso else None)
+        try:
+            bruto = (saida.with_suffix(".json")).read_bytes()
+        except FileNotFoundError:
+            raise RuntimeError("o whisper-cli terminou sem gerar o resultado (JSON). Fim da saída dele:\n"
+                               + "\n".join(err.strip().splitlines()[-15:])) from None
         silencios = _silencios(wav)
     seg_proc = time.monotonic() - t0
     try:
@@ -543,15 +748,21 @@ def transcrever(arquivo: Path | str, idioma: str = "auto", modelo: str = MODELO_
          "inicio": inicio, "fim": fim, "duracao_audio": round(dur, 3),
          "segundos_processamento": round(seg_proc, 2),
          "fator_tempo_real": round(seg_proc / dur, 3) if dur else None,
-         "texto": " ".join(s["texto"] for s in segs), "segmentos": segs, "whisper": WHISPER_VERSAO}
+         "texto": " ".join(s["texto"] for s in segs), "segmentos": segs, "whisper": _versao_motor(exe)}
     if descartados:
         r["descartados"] = [{"inicio": (s.get("palavras") or [s])[0]["inicio"], "texto": s["texto"],
                              "motivo": "frase típica de alucinação do Whisper com baixa confiança"} for s in descartados]
+    # com idioma='auto', guarda também sob a chave do idioma detectado: gerar_legenda/buscar_fala com
+    # idioma='pt' (ou o contrário, 'auto' de novo) reaproveitam esta transcrição
+    alvos = [cache]
+    if lang == "auto" and idioma_det and idioma_det in _IDIOMAS_WHISPER:
+        alvos.append(arq_cache(idioma_det))
     try:
         CACHE_TRANSCRICOES.mkdir(parents=True, exist_ok=True)
-        tmpc = cache.with_name(f".{cache.name}.{os.getpid()}.tmp")
-        tmpc.write_text(json.dumps(r, ensure_ascii=False))
-        os.replace(tmpc, cache)
+        for c in alvos:
+            tmpc = c.with_name(f".{c.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+            tmpc.write_text(json.dumps(r, ensure_ascii=False))
+            os.replace(tmpc, c)
     except OSError:
         pass
     r["cache"] = False
@@ -680,7 +891,10 @@ def montar_legendas(segmentos: list[dict], max_caracteres: int = 42, max_linhas:
         if c["fim"] - c["inicio"] > duracao_max:
             c["fim"] = c["inicio"] + duracao_max
         if prox is not None and c["fim"] > prox - 0.04:
-            c["fim"] = max(c["inicio"] + 0.2, prox - 0.04)
+            # termina 40 ms antes da próxima; se isso a deixar com menos de 0,2 s, encosta na próxima (nunca
+            # passa do início dela: legendas sobrepostas aparecem empilhadas)
+            c["fim"] = (prox - 0.04 if prox - 0.04 >= c["inicio"] + 0.2
+                        else max(c["inicio"], min(prox, c["inicio"] + 0.2)))
         if fim_audio is not None and c["fim"] > fim_audio:
             c["fim"] = max(c["inicio"] + 0.2, fim_audio)
         c["inicio"], c["fim"] = round(c["inicio"], 3), round(c["fim"], 3)
@@ -696,15 +910,101 @@ def _ts(t: float, sep: str) -> str:
     return f"{h:02d}:{m:02d}:{s:02d}{sep}{ms:03d}"
 
 
+def _linha_srt(ln: str) -> str:
+    # '-->' no texto seria lido como linha de tempo; linha vazia terminaria a legenda
+    return ln.replace("-->", "->").strip() or "\u00a0"
+
+
 def texto_srt(cues: list[dict]) -> str:
-    return "\n".join(f"{i}\n{_ts(c['inicio'], ',')} --> {_ts(c['fim'], ',')}\n" + "\n".join(c["linhas"]) + "\n"
-                     for i, c in enumerate(cues, 1))
+    return "\n".join(f"{i}\n{_ts(c['inicio'], ',')} --> {_ts(c['fim'], ',')}\n"
+                     + "\n".join(_linha_srt(ln) for ln in c["linhas"]) + "\n" for i, c in enumerate(cues, 1))
 
 
 def texto_vtt(cues: list[dict]) -> str:
+    # WebVTT: '&' e '<' são marcação (entidades/tags) e precisam de escape; '>' também ('-->' vira '--&gt;')
     corpo = "\n".join(f"{_ts(c['inicio'], '.')} --> {_ts(c['fim'], '.')}\n"
-                      + "\n".join(ln.replace("-->", "->") for ln in c["linhas"]) + "\n" for c in cues)
+                      + "\n".join(html.escape(_linha_srt(ln), quote=False) for ln in c["linhas"]) + "\n"
+                      for c in cues)
     return "WEBVTT\n\n" + corpo
+
+
+_TEMPO_LEG = re.compile(r"(?:(\d+):)?(\d{1,2}):(\d{2})[,.](\d{1,3})")
+
+
+def ler_legenda(arq: Path) -> list[dict]:
+    """Lê .srt/.vtt → [{inicio, fim, linhas}] com o TEXTO das legendas (sem marcação): tags HTML simples
+    (<i>, <b>, <u>) viram marcadores internos, outras tags (<font>, <c.x>, <v Nome>) e entidades do VTT são
+    resolvidas. Um `{\\anN}` no começo (convenção de .srt para posição) é mantido como posição."""
+    texto = arq.read_text(encoding="utf-8-sig", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+    vtt = arq.suffix.lower() == ".vtt"
+    cues = []
+    for bloco in re.split(r"\n\s*\n", texto):
+        linhas = bloco.split("\n")
+        k = next((i for i, ln in enumerate(linhas) if "-->" in ln), None)
+        if k is None:
+            continue  # cabeçalho WEBVTT, NOTE, STYLE, REGION, lixo
+        tempos = _TEMPO_LEG.findall(linhas[k])
+        if len(tempos) < 2:
+            continue
+        ini, fim = (int(h or 0) * 3600 + int(m) * 60 + int(s_) + int(ms.ljust(3, "0")) / 1000
+                    for h, m, s_, ms in tempos[:2])
+        corpo = [ln for ln in linhas[k + 1:]]
+        while corpo and not corpo[-1].strip():
+            corpo.pop()
+        if not corpo:
+            continue
+        pos = None
+        m = re.match(r"\s*\{\\an([1-9])\}", corpo[0])
+        if m:
+            pos = int(m.group(1))
+            corpo[0] = corpo[0][m.end():]
+        saida = []
+        for ln in corpo:
+            ln = re.sub(r"<(/?)([ibu])(?:\.[^>\s]*)?>", lambda t: f"\x00{t.group(1)}{t.group(2)}\x00", ln, flags=re.I)
+            ln = re.sub(r"<[^>]*>", "", ln)  # <font ...>, <c.amarelo>, <v Ana>, <00:00:01.000>...
+            if vtt or "&" in ln:
+                ln = html.unescape(ln)
+            saida.append(ln)
+        cues.append({"inicio": ini, "fim": fim, "linhas": saida, "pos": pos})
+    return cues
+
+
+def _esc_ass(ln: str) -> str:
+    """Texto literal numa linha Dialogue do ASS: '\\' seguido de N/n/h seria quebra/espaço e '{...}' seria
+    bloco de comando (\\pos, \\fs...). Barra ganha um 'word joiner' invisível depois; chaves viram \\{ \\}."""
+    ln = ln.replace("\\", "\\\u2060").replace("{", "\\{").replace("}", "\\}")
+    ln = re.sub(r"\x00(/?)([ibu])\x00", lambda t: "{\\" + t.group(2).lower() + ("0" if t.group(1) else "1") + "}", ln)
+    return ln.replace("\x00", "")
+
+
+def _tempo_ass(t: float) -> str:
+    cs = int(round(max(0.0, t) * 100))
+    h, cs = divmod(cs, 360_000)
+    m, cs = divmod(cs, 6000)
+    s_, cs = divmod(cs, 100)
+    return f"{h}:{m:02d}:{s_:02d}.{cs:02d}"
+
+
+_FORMATO_ESTILO = ("Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, "
+                   "Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
+                   "Alignment, MarginL, MarginR, MarginV, Encoding")
+
+
+def texto_ass(cues: list[dict], largura: int, altura: int) -> str:
+    """Script ASS completo (PlayRes = tamanho do vídeo, estilo Default a ser ajustado) com o texto escapado."""
+    ev = []
+    for c in cues:
+        pos = "{\\an%d}" % c["pos"] if c.get("pos") else ""
+        ev.append(f"Dialogue: 0,{_tempo_ass(c['inicio'])},{_tempo_ass(c['fim'])},Default,,0,0,0,,"
+                  + pos + "\\N".join(_esc_ass(ln) for ln in c["linhas"]))
+    return ("[Script Info]\nScriptType: v4.00+\n"
+            f"PlayResX: {largura}\nPlayResY: {altura}\nScaledBorderAndShadow: yes\nWrapStyle: 0\n"
+            "YCbCr Matrix: None\n\n[V4+ Styles]\n"
+            f"Format: {_FORMATO_ESTILO}\n"
+            "Style: Default,DejaVu Sans,16,&H00FFFFFF,&H00FFFFFF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,1,0,"
+            "2,10,10,10,1\n\n[Events]\n"
+            "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+            + "\n".join(ev) + "\n")
 
 
 def _criar_exclusivo(p: Path, conteudo: str) -> Path:
@@ -821,8 +1121,10 @@ def campos_estilo(altura_ref: int, altura_video: int, tamanho=None, cor=None, co
         c["Fontsize"] = f"{tam * k:.1f}"
     else:
         tam = None
+    if fonte and re.search(r"[,\r\n]", str(fonte)):
+        raise ValueError(f"fonte inválida: {fonte!r} (sem vírgula nem quebra de linha)")
     if fonte or completo:
-        c["Fontname"] = fonte or "DejaVu Sans"
+        c["Fontname"] = str(fonte).strip() if fonte else "DejaVu Sans"
     if cor is not None or completo:
         c["PrimaryColour"] = c["SecondaryColour"] = cor_ass(cor or "white")
     if negrito is not None or completo:
@@ -849,17 +1151,35 @@ def campos_estilo(altura_ref: int, altura_video: int, tamanho=None, cor=None, co
     return c
 
 
-def preparar_ass(origem: Path, destino: Path, largura: int, altura: int, estilo: dict, completo: bool) -> Path:
-    """Gera o .ass que vai ser queimado. .srt/.vtt: convertido pelo ffmpeg, com PlayRes = tamanho do vídeo
-    (medidas em pixels reais) e o estilo Default reescrito. .ass do usuário: copiado, com os campos pedidos
-    aplicados a todos os estilos (na escala do PlayResY dele)."""
+_CAMPOS_COR = ("PrimaryColour", "SecondaryColour", "OutlineColour", "BackColour")
+# HDR: o branco da legenda deve ficar em ~203 nits (ITU-R BT.2408), não no pico do formato (10 000 nits no PQ).
+# Fração do sinal para 203 nits: PQ ≈ 0,58; HLG = 0,75. As cores do estilo são escaladas por esse fator.
+_ESCALA_HDR = {"smpte2084": 0.58, "arib-std-b67": 0.75}
+
+
+def _escalar_cor(valor: str, k: float) -> str:
+    m = re.fullmatch(r"\s*&H([0-9A-Fa-f]{1,8})&?\s*", valor)
+    if not m:
+        return valor
+    v = int(m.group(1), 16)
+    a, b, g, r = (v >> 24) & 255, (v >> 16) & 255, (v >> 8) & 255, v & 255
+    b, g, r = (round(x * k) for x in (b, g, r))
+    return f"&H{a:02X}{b:02X}{g:02X}{r:02X}"
+
+
+def preparar_ass(origem: Path, destino: Path, largura: int, altura: int, estilo: dict, completo: bool,
+                 escala_cor: float = 1.0) -> Path:
+    """Gera o .ass que vai ser queimado. .srt/.vtt: lido por `ler_legenda` e escrito como ASS com o texto
+    escapado (chaves e barras do texto não viram comandos), PlayRes = tamanho do vídeo (medidas em pixels reais)
+    e o estilo Default reescrito. .ass do usuário: copiado, com os campos pedidos aplicados a todos os estilos
+    (na escala do PlayResY dele). escala_cor < 1 (vídeo HDR): escurece as cores dos estilos."""
     if origem.suffix.lower() in (".ass", ".ssa"):
         texto = origem.read_text(encoding="utf-8-sig", errors="replace")
     else:
-        r = core.rodar(core.FFMPEG + ["-i", str(origem), "-f", "ass", "-"])
-        texto = r.stdout
-        texto = re.sub(r"(?m)^PlayResX:.*$", f"PlayResX: {largura}", texto)
-        texto = re.sub(r"(?m)^PlayResY:.*$", f"PlayResY: {altura}", texto)
+        cues = ler_legenda(origem)
+        if not cues:
+            raise ValueError(f"nenhuma legenda reconhecida em {origem.name}")
+        texto = texto_ass(cues, largura, altura)
     m = re.search(r"(?m)^PlayResY:\s*(\d+)", texto)
     ref = int(m.group(1)) if m else 288
     campos = campos_estilo(ref, altura, completo=completo, largura_video=largura, **estilo)
@@ -873,6 +1193,10 @@ def preparar_ass(origem: Path, destino: Path, largura: int, altura: int, estilo:
             for nome, val in campos.items():
                 if nome in fmt:
                     vals[fmt.index(nome)] = val
+            if escala_cor != 1.0:
+                for nome in _CAMPOS_COR:
+                    if nome in fmt and fmt.index(nome) < len(vals):
+                        vals[fmt.index(nome)] = _escalar_cor(vals[fmt.index(nome)], escala_cor)
             ln = "Style: " + ",".join(vals)
         linhas.append(ln)
     destino.write_text("\n".join(linhas) + "\n", encoding="utf-8")
@@ -926,8 +1250,9 @@ def gravar_legenda(doc: Documento, legenda: str | Path | None = None, idioma: st
     n = len(doc._ler()["versoes"]) + 1
 
     def montar(info):
+        trc = str((info.get("v") or {}).get("color_transfer") or "")
         ass = preparar_ass(arq, doc.pasta / f"legenda_v{n:03d}.estilo.ass", info["w"], info["h"], estilo,
-                           completo=not eh_ass)
+                           completo=not eh_ass, escala_cor=_ESCALA_HDR.get(trc, 1.0))
         g = f"[0:V:0]subtitles=filename={core.esc_filtro(str(ass))}[vo]"
         return [g], f"legenda gravada no vídeo ({arq.name})"
 
@@ -940,6 +1265,20 @@ def gravar_legenda(doc: Documento, legenda: str | Path | None = None, idioma: st
         if tr.get("modelo_baixado"):
             v["detalhes"]["modelo_baixado"] = tr["modelo_baixado"]
     return v
+
+
+def _idioma_do_nome(stem: str) -> str | None:
+    """Idioma no fim do nome de uma legenda: 'video.pt' / 'video.pt-BR' / 'video.pt.2' / 'video.eng' → código."""
+    partes = stem.lower().split(".")[1:]
+    while partes and partes[-1].isdigit():  # video.pt.2 (cópia numerada por _criar_exclusivo)
+        partes.pop()
+    if not partes or not re.fullmatch(r"[a-z]{2,3}(?:[-_][a-z0-9]{2,4})?", partes[-1]):
+        return None
+    try:
+        lang = norm_idioma(partes[-1])
+    except ValueError:
+        return None
+    return None if lang == "auto" else lang
 
 
 def embutir_legenda(doc: Documento, legenda: str | Path | None = None, idioma: str = "auto",
@@ -965,17 +1304,28 @@ def embutir_legenda(doc: Documento, legenda: str | Path | None = None, idioma: s
     probe = core.ffprobe(entrada)
     n_leg = sum(1 for s in probe["streams"] if s.get("codec_type") == "subtitle")
     lang = (tr or {}).get("idioma") or (norm_idioma(idioma) if norm_idioma(idioma) != "auto" else None)
-    if not lang:  # legenda do usuário: tenta o sufixo do nome (video.pt.srt)
-        m = re.search(r"\.([a-z]{2})$", arq.stem.lower())
-        lang = m.group(1) if m else None
+    if not lang:  # legenda do usuário: tenta o sufixo do nome (video.pt.srt, video.pt-BR.srt, video.pt.2.srt)
+        lang = _idioma_do_nome(arq.stem)
     iso = _ISO639_2.get(lang or "", "und")
     saida = doc.proxima_saida(ext)
     cmd = core.FFMPEG + ["-i", str(entrada), "-i", str(arq), "-map", "0:V?", "-map", "0:a?", "-map", "0:s?"]
+    # capa (attached_pic: o 0:V acima a exclui) e fluxos de dados que o contêiner aceita
+    for st in probe["streams"]:
+        if st.get("codec_type") == "video" and (st.get("disposition") or {}).get("attached_pic"):
+            cmd += ["-map", f"0:{st['index']}"]
+        elif st.get("codec_type") == "data" and ext in (".mp4", ".mov", ".m4v"):
+            tag = str(st.get("codec_tag_string") or "").lower()
+            # tmcd: o muxer recria a partir da tag timecode; 'text': trilha de capítulos (recriada pelos
+            # capítulos copiados); mapear duplicaria. Outros (telemetria gpmd/GoPro, etc.) são mantidos.
+            if tag not in ("tmcd", "text"):
+                cmd += ["-map", f"0:{st['index']}"]
     if ext == ".mkv":
         cmd += ["-map", "0:t?"]
     cmd += ["-map", "1:0", "-c", "copy", f"-c:s:{n_leg}", codec, f"-metadata:s:s:{n_leg}", f"language={iso}"]
     if titulo:
         cmd += [f"-metadata:s:s:{n_leg}", f"title={titulo}"]
+        if codec == "mov_text":  # nome que players de MP4/MOV (QuickTime, VLC) mostram no menu de legendas
+            cmd += [f"-metadata:s:s:{n_leg}", f"handler_name={titulo}"]
     if padrao:
         cmd += [f"-disposition:s:{n_leg}", "default"]
         for i in range(n_leg):
@@ -1020,8 +1370,10 @@ def _vale(arquivo: str, faixa: int, a: float, b: float, alvo: float) -> float | 
     try:
         import numpy as np
         r = subprocess.run(core.FFMPEG + ["-ss", f"{max(0.0, a):.3f}", "-t", f"{b - max(0.0, a):.3f}", "-i",
-                                          arquivo, "-map", f"0:a:{int(faixa) - 1}", "-ac", "1", "-ar", "16000",
-                                          "-f", "s16le", "-"], capture_output=True, timeout=60)
+                                          arquivo, "-map", f"0:a:{int(faixa) - 1}",
+                                          "-af", "aresample=async=1:first_pts=0", "-ac", "1", "-ar", "16000",
+                                          "-f", "s16le", "-"], capture_output=True, timeout=60,
+                           preexec_fn=_preexec())
         x = np.frombuffer(r.stdout, dtype=np.int16).astype(np.float32) / 32768
     except Exception:  # noqa: BLE001
         return None
@@ -1034,6 +1386,29 @@ def _vale(arquivo: str, faixa: int, a: float, b: float, alvo: float) -> float | 
     t = max(0.0, a) + (np.arange(n) + 0.5) * 0.01
     k = int(np.argmin(db + 40 * np.abs(t - alvo)))
     return round(float(t[k]), 3)
+
+
+def _similaridade(alvo: list[str], janela: list[str]) -> float:
+    """Semelhança (0–1) entre as palavras procuradas e as de uma janela da transcrição. Base: razão de
+    caracteres (difflib) das frases normalizadas. Palavras curtas (até 4 letras) precisam aparecer IGUAIS
+    (normalizadas): 'não' ≠ 'no'/'ao', 'arte' ≠ 'até' — com poucas letras, 1 letra diferente é outra palavra.
+    Em frases de 4+ palavras tolera 1 palavra curta diferente a cada 4 (erro de reconhecimento em "de"/"do")."""
+    casadas: set[int] = set()
+    for bl in difflib.SequenceMatcher(None, alvo, janela, autojunk=False).get_matching_blocks():
+        casadas.update(range(bl.a, bl.a + bl.size))
+    def colada(w):  # frase longa: "é leve" reconhecido como "releve" (palavra curta grudada noutra)
+        return len(alvo) >= 4 and len(w) >= 3 and any(len(j) > len(w) and (j.endswith(w) or j.startswith(w))
+                                                      for j in janela)
+    curtas_erradas = sum(1 for k, w in enumerate(alvo) if len(w) <= 4 and k not in casadas and not colada(w))
+    if curtas_erradas > (len(alvo) // 4 if len(alvo) >= 4 else 0):
+        return 0.0
+    # a 1ª e a última palavra da janela também precisam ser parecidas (não sobrar palavra de fora nas bordas);
+    # busca de 1–2 palavras é mais exigente ('parte' ≠ 'até')
+    minimo = 0.8 if len(alvo) <= 2 else 0.6
+    for a_w, j_w in ((alvo[0], janela[0]), (alvo[-1], janela[-1])):
+        if a_w != j_w and difflib.SequenceMatcher(None, a_w, j_w, autojunk=False).ratio() < minimo:
+            return 0.0
+    return difflib.SequenceMatcher(None, " ".join(alvo), " ".join(janela), autojunk=False).ratio()
 
 
 def buscar_fala(transcricao: dict, texto: str, limiar: float = 0.75, margem_s: float = 0.1,
@@ -1055,15 +1430,16 @@ def buscar_fala(transcricao: dict, texto: str, limiar: float = 0.75, margem_s: f
         raise ValueError("texto vazio")
     ws = _palavras_norm(transcricao.get("segmentos") or [])
     n = len(alvo)
-    q = " ".join(alvo)
+    # nº de palavras da janela: igual ao procurado para 1–2 palavras; senão ±25% (o reconhecimento às vezes
+    # junta ou separa palavras: "pra"/"para a")
+    tol = 0 if n <= 2 else max(1, round(n * 0.25))
     cands = []
     for i in range(len(ws)):
         melhor = None
-        for L in range(max(1, n - 2), n + 3):
+        for L in range(max(1, n - tol), n + tol + 1):
             if i + L > len(ws):
                 break
-            c = " ".join(w["n"] for w in ws[i:i + L])
-            sim = difflib.SequenceMatcher(None, q, c, autojunk=False).ratio()
+            sim = _similaridade(alvo, [w["n"] for w in ws[i:i + L]])
             if melhor is None or sim > melhor[0]:
                 melhor = (sim, L)
         if melhor and melhor[0] >= limiar:

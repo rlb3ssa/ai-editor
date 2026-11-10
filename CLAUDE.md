@@ -134,6 +134,9 @@ cancelar/fechar/estado, `predefinicao`, `trecho`=índice no combo, `limite_mb`, 
   ~4 s: use o DTW (`--dtw base` **com `-nfa`**; com flash attention o `t_dtw` sai −1 sem aviso). Não use `--vad` junto:
   ele remapeia só os segmentos, não os tokens/DTW. Legenda queimada: gerar `.ass` com PlayRes = vídeo e estilo no
   arquivo; `force_style` com `Alignment` muda de significado entre versões da libass (0.17.1 usa o formato SSA antigo).
+  Áudio que começa depois do contêiner: extrair com `aresample=async=1:first_pts=0` (senão os tempos saem adiantados).
+  Texto de .srt/.vtt vai para o ASS por `ler_legenda` + `_esc_ass` (nunca pela conversão do ffmpeg, que interpreta
+  `{...}` e `\N` do texto). Um whisper-cli por vez (`_trava("whisper")`); ffmpeg da fala com `_rodar_ff` (PDEATHSIG).
   Testes de fala sem TTS no sistema: `uvx --from piper-tts piper` + voz `pt_BR-faber-medium` (só no scratchpad).
 
 ## Git
