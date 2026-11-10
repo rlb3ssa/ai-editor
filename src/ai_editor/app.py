@@ -685,8 +685,6 @@ class Janela(QMainWindow):
         self.vol.setToolTip("Volume geral")
         self.vol.valueChanged.connect(lambda v: self._set("volume", v))
         bl.addWidget(self.vol)
-        bl.addSpacing(4)
-        btn("fullscreen", "Tela cheia (F)", self._tela_cheia, tam=18)
         lado = max(g_esq.sizeHint().width(), g_dir.sizeHint().width())
         g_esq.setMinimumWidth(lado)
         g_dir.setMinimumWidth(lado)
