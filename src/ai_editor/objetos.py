@@ -6,8 +6,8 @@ Tudo roda na máquina do usuário, em CPU:
   - segmentação: SAM 2.1 (Meta, Apache-2.0) exportado para ONNX pelo `onnx-community` no Hugging Face (só o
     modelo de IMAGEM: codificador + decodificador de prompts). A propagação por memória do SAM 2 (memory
     attention/encoder) não está nesse export; o rastreamento é feito quadro a quadro: o prompt de cada quadro sai da
-    máscara do quadro anterior (caixa + ponto central + máscara anterior como dica), com checagem de
-    continuidade. Ver `segmentar`.
+    máscara do quadro vizinho (caixa ampliada + ponto interno; o export não aceita a máscara anterior como
+    entrada), escolhendo entre as 3 saídas a mais coerente com a anterior. Ver `segmentar`.
   - remoção: LaMa (Apache-2.0) em ONNX (`opencv/inpainting_lama`, entrada fixa 512x512), aplicado num recorte em
     volta da máscara; ou plano de fundo temporal (câmera parada), ou borrão (sem modelo).
   - modelos baixados no primeiro uso para ~/.local/share/ai-editor/modelos/<nome>/, de URLs com revisão (commit)
@@ -15,7 +15,10 @@ Tudo roda na máquina do usuário, em CPU:
     pesos (dados ONNX) — nada é executado.
 
 Processamento sempre em fluxo (pipe do ffmpeg, quadro a quadro): o vídeo nunca é carregado inteiro na memória.
-Antes de abrir um modelo, confere a memória livre (`MemAvailable`) e espera se estiver curta.
+Só os quadros do trecho da máscara passam pelo Python (RGB); o resto do vídeo segue no ffmpeg pelo caminho yuv
+nativo (`_cmd_versao`), com a mesma matriz de cor na ida e na volta.
+Antes de abrir um modelo, confere a memória livre (`MemAvailable`) e espera se estiver curta; durante a inferência,
+pausa se cair abaixo de 1,2 GB. Uma tarefa de IA por vez, também entre processos (`trava_ia`).
 
 Máscaras: vídeo em tons de cinza sem perda (FFV1 em .mkv) em ~/.cache/ai-editor/mascaras/<hash do original>/
 (fora de `.versoes/`, que o `desfazer` da última versão apaga), com um .json descrevendo o trecho (quadro inicial,
@@ -25,6 +28,9 @@ Sem Qt (usado pelo servidor MCP).
 """
 from __future__ import annotations
 
+import contextlib
+import errno
+import fcntl
 import hashlib
 import json
 import os
@@ -36,6 +42,7 @@ import threading
 import time
 import urllib.request
 import uuid
+from fractions import Fraction
 from pathlib import Path
 
 from . import binarios, core
@@ -124,14 +131,55 @@ def tamanho_modelo(nome: str) -> int:
     return sum(t for _, t, _ in MODELOS[nome]["arquivos"])
 
 
+def _arquivo_integro(p: Path, tam: int, sha: str) -> bool:
+    """Arquivo presente e íntegro. O SHA-256 é conferido UMA vez e fica num marcador `.<arquivo>.ok` (tamanho,
+    mtime e hash, como na Fase 6); depois basta comparar tamanho/mtime com o marcador."""
+    try:
+        st = p.stat()
+    except OSError:
+        return False
+    if st.st_size != tam:
+        return False
+    ok = p.with_name(f".{p.name}.ok")
+    assinatura = f"{st.st_size} {st.st_mtime_ns} {sha}"
+    try:
+        if ok.read_text().strip() == assinatura:
+            return True
+    except OSError:
+        pass
+    h = hashlib.sha256()
+    with open(p, "rb") as f:
+        while bloco := f.read(1 << 22):
+            h.update(bloco)
+    if h.hexdigest() != sha:
+        return False  # corrompido/alterado: baixar_modelo baixa de novo (o .parcial substitui atomicamente)
+    with contextlib.suppress(OSError):
+        ok.write_text(assinatura + "\n")
+    return True
+
+
 def modelo_pronto(nome: str) -> bool:
-    return all(_arquivo_modelo(nome, a).is_file() and _arquivo_modelo(nome, a).stat().st_size == t
-               for a, t, _ in MODELOS[nome]["arquivos"])
+    return all(_arquivo_integro(_arquivo_modelo(nome, a), t, sha) for a, t, sha in MODELOS[nome]["arquivos"])
+
+
+def _disco_cheio(e: BaseException) -> bool:
+    return getattr(e, "errno", None) in (errno.ENOSPC, errno.EDQUOT, errno.EFBIG) or (
+        isinstance(getattr(e, "reason", None), OSError) and e.reason.errno in (errno.ENOSPC, errno.EDQUOT))
+
+
+def _msg_disco_cheio(pasta: Path, precisa: int | None = None) -> str:
+    try:
+        import shutil
+        livre = shutil.disk_usage(pasta if pasta.exists() else pasta.parent).free
+    except OSError:
+        livre = None
+    return ("disco cheio em " + str(pasta) + (f" (livre: {_mb(livre)}" if livre is not None else " (")
+            + (f", precisa de ~{_mb(precisa)})" if precisa else ")") + ". Libere espaço e tente de novo")
 
 
 def _baixar(url: str, final: Path, sha256: str, tamanho: int, progresso=None, cancelar=None) -> None:
     """Baixa para `.<nome>.XXXX.parcial` na mesma pasta, confere tamanho e SHA-256 e só então renomeia
-    (os.replace, atômico). Qualquer falha apaga o parcial."""
+    (os.replace, atômico). Nunca recebe mais bytes que o tamanho esperado. Qualquer falha apaga o parcial."""
     final.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=f".{final.name}.", suffix=".parcial", dir=final.parent)
     h = hashlib.sha256()
@@ -142,12 +190,15 @@ def _baixar(url: str, final: Path, sha256: str, tamanho: int, progresso=None, ca
             while True:
                 if cancelar and cancelar():
                     raise Cancelado("download cancelado")
-                bloco = resp.read(1 << 20)
+                bloco = resp.read(min(1 << 20, tamanho - lido + 1))
                 if not bloco:
                     break
+                lido += len(bloco)
+                if lido > tamanho:
+                    raise RuntimeError(f"o servidor mandou mais que os {tamanho} bytes esperados de {url}; "
+                                       f"download descartado")
                 out.write(bloco)
                 h.update(bloco)
-                lido += len(bloco)
                 if progresso:
                     progresso(lido)
         if lido != tamanho:
@@ -157,6 +208,9 @@ def _baixar(url: str, final: Path, sha256: str, tamanho: int, progresso=None, ca
                                f"arquivo descartado")
         os.chmod(tmp, 0o644)
         os.replace(tmp, final)
+        st = final.stat()  # já conferido: grava o marcador para modelo_pronto não reler o arquivo
+        with contextlib.suppress(OSError):
+            final.with_name(f".{final.name}.ok").write_text(f"{st.st_size} {st.st_mtime_ns} {sha256}\n")
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise
@@ -174,34 +228,63 @@ def _limpar_parciais(pasta: Path, idade_s: float = 3600) -> None:
             pass
 
 
+@contextlib.contextmanager
+def _trava_arquivo(caminho: Path, cancelar=None, aviso=None, texto: str = ""):
+    """Trava exclusiva entre processos (fcntl.flock), esperando a vez sem perder o cancelamento."""
+    caminho.parent.mkdir(parents=True, exist_ok=True)
+    with open(caminho, "a") as f:
+        avisado = False
+        while True:
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if cancelar and cancelar():
+                    raise Cancelado("cancelada enquanto esperava a vez") from None
+                if aviso and texto and not avisado:
+                    aviso(texto)
+                    avisado = True
+                time.sleep(0.3)
+        try:
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
 def baixar_modelo(nome: str, progresso=None, cancelar=None) -> Path:
-    """Garante o modelo em disco (baixa o que faltar, com SHA-256 conferido). progresso(fração 0..1)."""
+    """Garante o modelo em disco (baixa o que faltar, com SHA-256 conferido). progresso(fração 0..1).
+    Downloads simultâneos do mesmo modelo (threads ou processos) fazem fila: o segundo só confere."""
     if nome not in MODELOS:
         raise ValueError(f"modelo desconhecido: {nome!r}; opções: {', '.join(MODELOS)}")
     m = MODELOS[nome]
     pasta = _pasta_modelo(nome)
     if modelo_pronto(nome):
         return pasta
-    _limpar_parciais(pasta)
-    total = tamanho_modelo(nome)
-    feito = 0
-    for arq, tam, sha in m["arquivos"]:
-        final = _arquivo_modelo(nome, arq)
-        if final.is_file() and final.stat().st_size == tam:
+    with _trava_arquivo(MODELOS_OBJ_DIR / f".{nome}.lock", cancelar):
+        if modelo_pronto(nome):
+            return pasta
+        _limpar_parciais(pasta)
+        total = tamanho_modelo(nome)
+        feito = 0
+        for arq, tam, sha in m["arquivos"]:
+            final = _arquivo_modelo(nome, arq)
+            if _arquivo_integro(final, tam, sha):
+                feito += tam
+                continue
+            url = _HF.format(repo=m["repo"], rev=m["revisao"], arq=arq)
+            base = feito
+            cb = (lambda n, b=base: progresso((b + n) / total)) if progresso else None
+            try:
+                _baixar(url, final, sha, tam, cb, cancelar)
+            except OSError as e:
+                if _disco_cheio(e):
+                    raise OSError(errno.ENOSPC, _msg_disco_cheio(pasta, total - feito)) from e
+                raise IAIndisponivel(f"não consegui baixar o modelo '{nome}' ({_mb(total)}) de {url}: {e}. "
+                                     f"Sem internet? Baixe manualmente para {final}") from e
             feito += tam
-            continue
-        url = _HF.format(repo=m["repo"], rev=m["revisao"], arq=arq)
-        base = feito
-        cb = (lambda n, b=base: progresso((b + n) / total)) if progresso else None
-        try:
-            _baixar(url, final, sha, tam, cb, cancelar)
-        except OSError as e:
-            raise IAIndisponivel(f"não consegui baixar o modelo '{nome}' ({_mb(total)}) de {url}: {e}. "
-                                 f"Sem internet? Baixe manualmente para {final}") from e
-        feito += tam
-    (pasta / "ORIGEM.txt").write_text(
-        f"{nome}\nrepositório: https://huggingface.co/{m['repo']}\nrevisão: {m['revisao']}\n"
-        f"licença: {m['licenca']}\n" + "".join(f"{a}  {s}\n" for a, _, s in m["arquivos"]))
+        (pasta / "ORIGEM.txt").write_text(
+            f"{nome}\nrepositório: https://huggingface.co/{m['repo']}\nrevisão: {m['revisao']}\n"
+            f"licença: {m['licenca']}\n" + "".join(f"{a}  {s}\n" for a, _, s in m["arquivos"]))
     if progresso:
         progresso(1.0)
     return pasta
@@ -210,8 +293,12 @@ def baixar_modelo(nome: str, progresso=None, cancelar=None) -> Path:
 # ---------------------------------------------------------------- ONNX Runtime e memória
 _SESSOES: dict[str, object] = {}
 _TRAVA_SESSOES = threading.Lock()
+_USO = {"ultimo": 0.0, "vigia": None}
 MEMORIA_MIN_GB = 2.5     # não abre modelo com menos que isto livre (MemAvailable)
+MEMORIA_PAUSA_GB = 1.2   # durante a inferência: abaixo disto, pausa até voltar a MEMORIA_RETOMAR_GB
+MEMORIA_RETOMAR_GB = 1.6
 ESPERA_MEMORIA_S = 1200  # espera até 20 min pela memória, conferindo a cada 60 s
+SESSOES_OCIOSAS_S = 300  # sessões em cache são fechadas depois de 5 min sem uso (ou antes, se a RAM cair)
 THREADS = 4
 
 
@@ -253,26 +340,71 @@ def memoria_livre_gb() -> float:
 
 
 def esperar_memoria(minimo_gb: float = MEMORIA_MIN_GB, espera_s: float = ESPERA_MEMORIA_S, cancelar=None,
-                    aviso=None) -> float:
-    """Espera (de 60 em 60 s, até `espera_s`) haver `minimo_gb` livres; erro se não houver."""
+                    aviso=None, intervalo_s: float = 60) -> float:
+    """Espera (de `intervalo_s` em `intervalo_s`, até `espera_s`) haver `minimo_gb` livres; erro se não houver.
+    Antes de esperar, fecha as sessões em cache (que podem ser a causa)."""
     fim = time.monotonic() + espera_s
     while True:
         livre = memoria_livre_gb()
         if livre >= minimo_gb:
             return livre
+        if _SESSOES:
+            liberar_modelos()
+            continue
         if time.monotonic() >= fim:
             raise MemoryError(f"memória livre insuficiente para a IA: {livre:.1f} GB (precisa de {minimo_gb} GB); "
                               f"feche programas e tente de novo")
         if aviso:
             aviso(f"esperando memória livre ({livre:.1f} GB < {minimo_gb} GB)")
-        for _ in range(60):
+        for _ in range(int(intervalo_s)):
             if cancelar and cancelar():
                 raise Cancelado("cancelado enquanto esperava memória")
             time.sleep(1)
 
 
+def _pausa_memoria(cancelar=None, aviso=None) -> None:
+    """Guarda DURANTE a inferência (chamada a cada poucos quadros): abaixo de MEMORIA_PAUSA_GB, pausa (de 5 em 5 s,
+    até 20 min) até a memória voltar a MEMORIA_RETOMAR_GB. As sessões em uso não são fechadas aqui."""
+    if memoria_livre_gb() >= MEMORIA_PAUSA_GB:
+        return
+    fim = time.monotonic() + ESPERA_MEMORIA_S
+    while (livre := memoria_livre_gb()) < MEMORIA_RETOMAR_GB:
+        if time.monotonic() >= fim:
+            raise MemoryError(f"memória livre ficou abaixo de {MEMORIA_PAUSA_GB} GB por 20 min ({livre:.1f} GB): "
+                              f"tarefa interrompida; feche programas e tente de novo")
+        if aviso:
+            aviso(f"pausado: pouca memória livre ({livre:.1f} GB); retomo com {MEMORIA_RETOMAR_GB} GB")
+        for _ in range(5):
+            if cancelar and cancelar():
+                raise Cancelado("cancelado enquanto esperava memória")
+            time.sleep(1)
+
+
+def _vigiar_sessoes() -> None:
+    """Thread de fundo: fecha as sessões ociosas há SESSOES_OCIOSAS_S, ou ociosas há 20 s se a RAM cair abaixo
+    de MEMORIA_MIN_GB. Fechar é sempre seguro: quem está usando uma sessão guarda a própria referência."""
+    while True:
+        time.sleep(15)
+        with _TRAVA_SESSOES:
+            if not _SESSOES:
+                _USO["vigia"] = None
+                return
+            ocioso = time.monotonic() - _USO["ultimo"]
+            if ocioso > SESSOES_OCIOSAS_S or (ocioso > 20 and memoria_livre_gb() < MEMORIA_MIN_GB):
+                _SESSOES.clear()
+
+
+def _usar(sessao):
+    _USO["ultimo"] = time.monotonic()
+    return sessao
+
+
+def _sessao_carregada(caminho: Path) -> bool:
+    return str(caminho) in _SESSOES
+
+
 def _sessao(caminho: Path):
-    """Sessão ONNX Runtime em CPU (4 threads), reaproveitada enquanto o processo vive."""
+    """Sessão ONNX Runtime em CPU (4 threads), em cache por alguns minutos (ver `_vigiar_sessoes`)."""
     chave = str(caminho)
     with _TRAVA_SESSOES:
         s = _SESSOES.get(chave)
@@ -286,13 +418,48 @@ def _sessao(caminho: Path):
             op.log_severity_level = 3
             s = ort.InferenceSession(str(caminho), op, providers=["CPUExecutionProvider"])
             _SESSOES[chave] = s
+        _USO["ultimo"] = time.monotonic()
+        if _USO["vigia"] is None:
+            _USO["vigia"] = threading.Thread(target=_vigiar_sessoes, name="ia-sessoes", daemon=True)
+            _USO["vigia"].start()
         return s
 
 
 def liberar_modelos() -> None:
-    """Fecha as sessões (devolve a memória dos modelos)."""
+    """Fecha as sessões em cache (a memória volta quando ninguém mais as usa)."""
     with _TRAVA_SESSOES:
         _SESSOES.clear()
+
+
+_TRAVA_IA = threading.RLock()  # uma tarefa pesada por vez neste processo (memória curta)
+_IA_LOCAL = threading.local()  # .n (aninhamento da trava entre processos), .tarefa (Tarefa em execução)
+
+
+@contextlib.contextmanager
+def trava_ia(cancelar=None, aviso=None):
+    """Uma tarefa de IA por vez: na thread (fila do processo) e entre processos (flock em
+    ~/.cache/ai-editor/ia.lock — outro servidor MCP ou outra janela). Reentrante na mesma thread. A espera
+    respeita o cancelamento (tarefa na fila cancela na hora)."""
+    while not _TRAVA_IA.acquire(timeout=0.2):
+        if cancelar and cancelar():
+            raise Cancelado("cancelada na fila")
+    try:
+        if getattr(_IA_LOCAL, "n", 0):
+            _IA_LOCAL.n += 1
+            try:
+                yield
+            finally:
+                _IA_LOCAL.n -= 1
+            return
+        with _trava_arquivo(core.CACHE_DIR / "ia.lock", cancelar, aviso,
+                            "esperando outra tarefa de IA terminar (outro processo)"):
+            _IA_LOCAL.n = 1
+            try:
+                yield
+            finally:
+                _IA_LOCAL.n = 0
+    finally:
+        _TRAVA_IA.release()
 
 
 # ---------------------------------------------------------------- imagem em numpy (sem OpenCV)
@@ -433,12 +600,11 @@ class Tarefa:
 
 
 TAREFAS: dict[str, Tarefa] = {}
-_TRAVA_IA = threading.Lock()  # uma tarefa pesada de IA por vez (memória curta)
 
 
 def iniciar_tarefa(nome: str, descricao: str, fn, *a, ao_progresso=None, **k) -> Tarefa:
-    """Roda fn(*a, progresso=..., cancelar=..., etapa=..., **k) numa thread. Tarefas pesadas fazem fila
-    (uma por vez). ao_progresso(fração, etapa) é chamado a cada atualização (ex.: barra de status da janela)."""
+    """Roda fn(*a, progresso=..., cancelar=..., etapa=..., **k) numa thread. Tarefas fazem fila (uma por vez,
+    também entre processos: `trava_ia`); cancelar uma tarefa na fila vale na hora. ao_progresso(fração, etapa) é chamado a cada atualização (ex.: barra de status da janela)."""
     t = Tarefa(nome, descricao)
     # guarda só as 20 tarefas mais recentes
     for velho in sorted(TAREFAS.values(), key=lambda x: x.inicio)[:-19]:
@@ -459,8 +625,9 @@ def iniciar_tarefa(nome: str, descricao: str, fn, *a, ao_progresso=None, **k) ->
         prog(t.progresso)
 
     def corpo():
+        _IA_LOCAL.tarefa = t
         try:
-            with _TRAVA_IA:
+            with trava_ia(t.cancelado, etapa):
                 if t.cancelado():
                     raise Cancelado("cancelada antes de começar")
                 t.estado = "rodando"
@@ -472,7 +639,8 @@ def iniciar_tarefa(nome: str, descricao: str, fn, *a, ao_progresso=None, **k) ->
         except BaseException as e:  # noqa: BLE001
             t.estado, t.erro = "erro", f"{type(e).__name__}: {e}"
         finally:
-            liberar_modelos()  # o processo do MCP não segura ~1–2 GB de modelos entre tarefas
+            # as sessões ONNX ficam em cache por alguns minutos (_vigiar_sessoes fecha as ociosas)
+            _IA_LOCAL.tarefa = None
             t.fim = time.time()
             t._feito.set()
 
@@ -516,13 +684,22 @@ class _Leitor:
 
 
 class _Escritor:
-    """ffmpeg que recebe quadros brutos pelo stdin."""
+    """ffmpeg que recebe quadros brutos pelo stdin. ao_tempo(s): progresso do ffmpeg (`-progress pipe:1`, só se o
+    comando o pedir)."""
 
-    def __init__(self, cmd: list[str]):
+    def __init__(self, cmd: list[str], ao_tempo=None):
         self.cmd = cmd
         self.err = tempfile.TemporaryFile()
-        self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=self.err,
+        self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE,
+                                     stdout=subprocess.PIPE if ao_tempo else subprocess.DEVNULL, stderr=self.err,
                                      preexec_fn=core._morrer_com_pai)
+        if ao_tempo:
+            def ler():
+                for linha in self.proc.stdout:
+                    if linha.startswith(b"out_time_us="):
+                        with contextlib.suppress(ValueError):
+                            ao_tempo(max(0, int(linha.split(b"=", 1)[1])) / 1e6)
+            threading.Thread(target=ler, daemon=True).start()
 
     def escrever(self, quadro) -> None:
         try:
@@ -530,16 +707,25 @@ class _Escritor:
         except BrokenPipeError:
             self.fechar()
 
-    def fechar(self) -> None:
+    def fechar(self, cancelar=None) -> None:
         try:
             self.proc.stdin.close()
         except OSError:
             pass
-        self.proc.wait()
+        while True:
+            try:
+                self.proc.wait(timeout=0.5)
+                break
+            except subprocess.TimeoutExpired:
+                if cancelar and cancelar():
+                    self.abortar()
+                    raise Cancelado("cancelado") from None
         if self.proc.returncode != 0:
             self.err.seek(0)
-            raise core.ErroFFmpeg(f"comando falhou ({self.proc.returncode}): {shlex.join(self.cmd)}\n"
-                                  f"{self.err.read().decode(errors='replace')[-3000:]}")
+            texto = self.err.read().decode(errors="replace")
+            if "No space left" in texto:
+                raise OSError(errno.ENOSPC, _msg_disco_cheio(Path(self.cmd[-1]).parent))
+            raise core.ErroFFmpeg(f"comando falhou ({self.proc.returncode}): {shlex.join(self.cmd)}\n{texto[-3000:]}")
 
     def abortar(self) -> None:
         if self.proc.poll() is None:
@@ -547,60 +733,160 @@ class _Escritor:
             self.proc.wait()
 
 
+# ---------------------------------------------------------------- cor (rgb ↔ yuv sem trocar a matriz)
+_MATRIZES = {"bt709": "bt709", "smpte170m": "bt601", "bt470bg": "bt601", "bt2020nc": "bt2020",
+             "bt2020c": "bt2020", "fcc": "fcc", "smpte240m": "smpte240m"}
+_TAG_MATRIZ = {"bt709": "bt709", "bt601": "smpte170m", "bt2020": "bt2020nc", "fcc": "fcc", "smpte240m": "smpte240m"}
+
+
+_FLAGS_LER = "lanczos+accurate_rnd+full_chroma_int"  # sem full_chroma_int a ida e volta escurecia ~1 nível
+_FLAGS_GRAVAR = "area+accurate_rnd"  # medido: melhor PSNR de croma na volta para 4:2:0
+
+
+def _cor(info: dict) -> tuple[str, str]:
+    """(matriz para o filtro scale, faixa 'tv'|'pc') da origem. Sem tag, a que os players supõem: BT.709 em HD
+    (altura ≥ 720), BT.601 abaixo. A MESMA matriz é usada para ler (yuv→rgb) e gravar (rgb→yuv): a ida e volta não
+    muda as cores (antes a gravação usava o padrão do swscale, BT.601, num vídeo marcado BT.709)."""
+    v = info.get("v") or {}
+    mat = _MATRIZES.get(v.get("color_space") or "")
+    if not mat:
+        mat = "bt709" if min(info["w"], info["h"]) >= 720 else "bt601"
+    faixa = "pc" if (v.get("color_range") == "pc" or str(v.get("pix_fmt", "")).startswith("yuvj")) else "tv"
+    return mat, faixa
+
+
+def _tags_cor_saida(info: dict) -> list[str]:
+    """Tags de cor para um arquivo gerado do zero (recorte): as da origem, com a matriz usada na conversão."""
+    mat, faixa = _cor(info)
+    tags = core._tags_cor(info.get("v"))
+    if "-colorspace" not in tags:
+        tags += ["-colorspace", _TAG_MATRIZ[mat]]
+    padrao = {"bt709": "bt709", "bt601": "smpte170m", "bt2020": "bt2020"}.get(mat)
+    if padrao and "-color_primaries" not in tags:  # o MOV só grava o átomo colr com as três tags
+        tags += ["-color_primaries", padrao]
+    if padrao and "-color_trc" not in tags:
+        tags += ["-color_trc", "bt2020-10" if padrao == "bt2020" else padrao]
+    if "-color_range" not in tags:
+        tags += ["-color_range", faixa]
+    return tags
+
+
+def _avisos_cor(info: dict) -> list[str]:
+    v = info.get("v") or {}
+    av = []
+    if core._10bits(info.get("pix_fmt", "")):
+        av.append("origem de 10 bits: o trecho processado passa por RGB de 8 bits (pode surgir 'banding' em "
+                  "degradês); fora do trecho o vídeo continua em 10 bits")
+    if v.get("color_transfer") in ("smpte2084", "arib-std-b67"):
+        av.append("vídeo HDR (PQ/HLG): o trecho é processado nos valores codificados, sem conversão de tom; as tags "
+                  "HDR são mantidas")
+    return av
+
+
 def _cmd_ler_video(entrada: Path, info: dict, ss: float | None = None, quadros: int | None = None,
                    tamanho: tuple[int, int] | None = None, threads: int = 4) -> list[str]:
-    """ffmpeg → rgb24 bruto no stdout, em fps constante (a taxa do vídeo), no tamanho EXIBIDO (rotação e
-    pixels não quadrados já aplicados) ou em `tamanho` (w, h)."""
-    vf = [info["pre"]] if info.get("pre") else []
-    if tamanho:
-        vf.append(f"scale={tamanho[0]}:{tamanho[1]}:flags=bilinear")
-    vf.append("format=rgb24")
+    """ffmpeg → rgb24 bruto no stdout, em fps constante (`info['taxa']`), no tamanho EXIBIDO (rotação e pixels não
+    quadrados já aplicados) ou em `tamanho` (w, h), com a matriz de cor da origem (`_cor`).
+    ss=None = desde o 1º quadro; quadros=None = até o fim (exatamente `_total_quadros`). Sempre com `-ss` quando o
+    vídeo começa depois do contêiner: sem ele o modo cfr repete o 1º quadro para cobrir o atraso e desloca tudo."""
+    i_ini = 0
+    if ss is None:
+        ss = _ss_do_quadro(info, 0)
+    else:
+        i_ini = _primeiro_quadro_desde(info, ss)
+    if quadros is None:
+        quadros = max(1, _total_quadros(info) - i_ini)
+    mat, faixa = _cor(info)
+    tw, th = tamanho or (info["w"], info["h"])
+    flags = "bilinear" if tamanho else _FLAGS_LER
+    vf = f"scale={tw}:{th}:flags={flags}:in_color_matrix={mat}:in_range={faixa},setsar=1,format=rgb24"
     cmd = core.FFMPEG + ["-threads", str(threads)] + info["dec"]
-    if ss is not None and ss > 0:
+    if ss > 0:
         cmd += ["-ss", f"{ss:.6f}"]
-    cmd += ["-i", str(entrada), "-map", "0:V:0", "-an", "-sn", "-vf", ",".join(vf),
-            "-fps_mode", "cfr", "-r", info["taxa"]]
-    if quadros is not None:
-        cmd += ["-frames:v", str(int(quadros))]
+    else:
+        # sem -ss os tempos chegam ao cfr como (atraso + i/fps); com -ss, como (i - j)/fps + 1/4 de quadro. Põe a
+        # leitura desde o início na MESMA fase, senão em VFR o cfr escolhe vizinhos diferentes num buraco
+        vf = f"setpts=PTS+{0.25 / _fps(info) - info['atraso_video']:.6f}/TB," + vf
+    cmd += ["-i", str(entrada), "-map", "0:V:0", "-an", "-sn", "-vf", vf,
+            "-fps_mode", "cfr", "-r", info["taxa"], "-frames:v", str(int(quadros))]
     return cmd + ["-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
 
 
-def _cmd_ler_mascara(arq: Path) -> list[str]:
-    return core.FFMPEG + ["-threads", "2", "-i", str(arq), "-map", "0:v:0", "-f", "rawvideo",
-                          "-pix_fmt", "gray", "-"]
+_PRE_S = 0.3  # a leitura de um quadro i começa ~0,3 s antes e descarta o excesso (ver _abrir_video)
+
+
+def _abrir_video(entrada: Path, info: dict, i: int, quadros: int, tamanho: tuple[int, int] | None = None):
+    """(_Leitor dos quadros [i, i+quadros), comando). Em vídeo VFR a busca precisa (`-ss`) DESCARTA o quadro de
+    origem anterior ao ponto de busca, que ainda estaria na tela no quadro i (num buraco de 100 ms, o quadro i
+    sairia como o seguinte); por isso começa até _PRE_S antes e descarta os quadros a mais: o quadro i sai igual ao
+    da leitura sequencial do vídeo inteiro."""
+    pre = min(i, int(np.ceil(_PRE_S * _fps(info))))
+    j = i - pre
+    cmd = _cmd_ler_video(entrada, info, _ss_do_quadro(info, j) if j > 0 else None, quadros + pre, tamanho)
+    tw, th = tamanho or (info["w"], info["h"])
+    leitor = _Leitor(cmd, tw, th, 3)
+    for _ in range(pre):
+        if leitor.ler() is None:
+            break
+    return leitor, cmd
+
+
+def _cmd_ler_mascara(arq: Path, tamanho: tuple[int, int] | None = None) -> list[str]:
+    """Máscara (cinza) → bruto. `tamanho` (w, h): reamostra (vizinho mais próximo) para um vídeo que perdeu 1 px na
+    versão anterior (dimensão ímpar arredondada para par)."""
+    vf = ["-vf", f"scale={tamanho[0]}:{tamanho[1]}:flags=neighbor"] if tamanho else []
+    return core.FFMPEG + ["-threads", "2", "-i", str(arq), "-map", "0:v:0"] + vf + ["-f", "rawvideo",
+                                                                                 "-pix_fmt", "gray", "-"]
 
 
 # ---------------------------------------------------------------- tempo ↔ quadro
+# Uma taxa só no módulo todo: a `taxa` (r_frame_rate) com que o leitor gera os quadros em CFR. Em vídeo VFR (celular:
+# r=30, média 29,97) a média (avg_frame_rate) daria outro nº de quadros que o leitor e desalinharia os índices.
+def _fps(info: dict) -> float:
+    try:
+        return float(Fraction(str(info["taxa"])))
+    except (ValueError, ZeroDivisionError, KeyError):
+        return float(info.get("fps") or 30.0)
+
+
 def _quadro_em(info: dict, t: float) -> int:
     """Índice do quadro exibido no tempo t (desconta o atraso do vídeo no contêiner)."""
-    return max(0, int(np.floor((t - info["atraso_video"]) * info["fps"] + 1e-3)))
+    return max(0, int(np.floor((t - info["atraso_video"]) * _fps(info) + 1e-3)))
 
 
 def _primeiro_quadro_desde(info: dict, t: float) -> int:
     """Índice do primeiro quadro com tempo ≥ t (o que o `-ss t` preciso entrega primeiro)."""
-    return max(0, int(np.ceil((t - info["atraso_video"]) * info["fps"] - 1e-3)))
+    return max(0, int(np.ceil((t - info["atraso_video"]) * _fps(info) - 1e-3)))
 
 
-def _total_quadros(info: dict) -> int:
-    """Quadros do vídeo (em CFR na taxa dele): pela duração da faixa de VÍDEO (a do contêiner inclui o áudio, que
-    costuma passar um pouco do fim do vídeo)."""
+def _duracao_video(info: dict) -> float:
     v = info.get("v") or {}
     try:
         dv = float(v.get("duration") or 0)
     except ValueError:
         dv = 0.0
+    if dv <= 0:  # MKV/WebM: duração por faixa só na tag DURATION
+        m = re.fullmatch(r"(\d+):(\d+):(\d+(?:\.\d+)?)", str((v.get("tags") or {}).get("DURATION", "")))
+        if m:
+            dv = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
     if dv <= 0:
         dv = info["dur"] - info["atraso_video"]
-    return max(1, int(round(dv * info["fps"])))
+    return dv
+
+
+def _total_quadros(info: dict) -> int:
+    """Quadros do vídeo na grade CFR da `taxa`: duração da faixa de VÍDEO × taxa (a do contêiner inclui o áudio,
+    que costuma passar um pouco do fim do vídeo). O leitor entrega exatamente isto (`-frames:v`)."""
+    return max(1, int(round(_duracao_video(info) * _fps(info))))
 
 
 def _tempo_do_quadro(info: dict, i: int) -> float:
-    return info["atraso_video"] + i / info["fps"]
+    return info["atraso_video"] + i / _fps(info)
 
 
 def _ss_do_quadro(info: dict, i: int) -> float:
     """-ss que faz o ffmpeg (busca precisa) entregar exatamente o quadro i primeiro."""
-    return max(0.0, _tempo_do_quadro(info, i) - 0.25 / info["fps"])
+    return max(0.0, _tempo_do_quadro(info, i) - 0.25 / _fps(info))
 
 
 # ---------------------------------------------------------------- SAM 2.1 (imagem) + rastreamento simples
@@ -618,7 +904,7 @@ class SAM:
     def codificar(self, img1024):
         x = (img1024.astype(np.float32) / 255.0 - _MEDIA) / _DESVIO
         x = np.ascontiguousarray(x.transpose(2, 0, 1)[None])
-        return self.cod.run(None, {"pixel_values": x})
+        return _usar(self.cod).run(None, {"pixel_values": x})
 
     def decodificar(self, emb, pontos, rotulos, caixa=None):
         """pontos/caixa em coordenadas 1024x1024. Devolve (logits [3,256,256], iou [3], placar do objeto)."""
@@ -661,8 +947,19 @@ def _iou(a, b) -> float:
     return float(np.logical_and(a, b).sum() / u) if u else 0.0
 
 
+def _sao_fracoes(valores: list[float], nome: str) -> bool:
+    """Frações 0–1 ou pixels? Todos em [0, 1] → frações; mas só 0 e 1 inteiros ([[1, 1]]) é ambíguo (pixel 1,1 ou
+    o canto do quadro?) → erro pedindo para escrever de forma inequívoca."""
+    if not all(0 <= v <= 1 for v in valores):
+        return False
+    if all(v in (0.0, 1.0) for v in valores) and any(v == 1.0 for v in valores):
+        raise ValueError(f"{nome}: {valores} é ambíguo (pixel ou fração do quadro?). Use frações com decimais "
+                         f"(ex.: 0.5 = meio; 0.999 = borda) ou pixels maiores que 1")
+    return True
+
+
 def _prompt_px(pontos, w: int, h: int, nome: str) -> list[tuple[float, float]]:
-    """[[x, y], ...] em pixels do vídeo exibido ou frações 0–1 → lista de (x, y) em pixels."""
+    """[[x, y], ...] em frações 0–1 do quadro (recomendado) ou pixels do vídeo exibido → (x, y) em pixels."""
     if not pontos:
         return []
     if isinstance(pontos[0], (int, float, str)):
@@ -674,7 +971,7 @@ def _prompt_px(pontos, w: int, h: int, nome: str) -> list[tuple[float, float]]:
         except (TypeError, ValueError):
             raise ValueError(f"{nome}: use [[x, y], ...] em pixels ou frações 0–1") from None
         out.append((x, y))
-    if all(0 <= x <= 1 and 0 <= y <= 1 for x, y in out):
+    if _sao_fracoes([v for p in out for v in p], nome):
         out = [(x * w, y * h) for x, y in out]
     for x, y in out:
         if not (0 <= x <= w and 0 <= y <= h):
@@ -692,7 +989,7 @@ def _caixa_px(caixa, w: int, h: int) -> tuple[float, float, float, float] | None
         x, y, cw, ch = (float(str(v).replace(",", ".")) for v in caixa)
     except (TypeError, ValueError):
         raise ValueError("caixa: use [x, y, largura, altura] em pixels ou frações 0–1") from None
-    if all(0 <= v <= 1 for v in (x, y, cw, ch)):
+    if all(0 <= v <= 1 for v in (x, y, cw, ch)):  # caixa de 1 px não faz sentido: [0, 0, 1, 1] = quadro todo
         x, y, cw, ch = x * w, y * h, cw * w, ch * h
     if cw <= 0 or ch <= 0:
         raise ValueError("caixa: largura e altura precisam ser positivas")
@@ -815,6 +1112,9 @@ def _limpar_mascaras_velhas() -> None:
         return
     for pasta in MASCARAS_DIR.iterdir():
         try:
+            for f in pasta.glob(".obj*.parcial.mkv"):  # processo morto no meio da segmentação
+                if agora - f.stat().st_mtime > 3600:
+                    f.unlink()
             arqs = list(pasta.iterdir())
             if all(agora - a.stat().st_mtime > MASCARAS_VALIDADE_S for a in arqs):
                 for a in arqs:
@@ -822,6 +1122,46 @@ def _limpar_mascaras_velhas() -> None:
                 pasta.rmdir()
         except OSError:
             pass
+
+
+# ---- de onde veio a máscara (para não aplicar uma máscara velha num vídeo cuja linha do tempo mudou)
+_LINHAS_TEMPO: dict[tuple, dict] = {}
+
+
+def _identidade(arq: Path) -> dict:
+    """Tamanho, mtime e hash parcial (tamanho + 1º e último MiB) do arquivo: barato até em vídeos grandes."""
+    st = arq.stat()
+    h = hashlib.sha256(str(st.st_size).encode())
+    with open(arq, "rb") as f:
+        h.update(f.read(1 << 20))
+        if st.st_size > 2 << 20:
+            f.seek(-(1 << 20), os.SEEK_END)
+            h.update(f.read(1 << 20))
+    return {"tamanho": st.st_size, "mtime": st.st_mtime_ns, "hash": h.hexdigest()[:32]}
+
+
+def _linha_do_tempo(arq: Path, info: dict) -> dict:
+    """O que uma edição SÓ de quadros (cor, destacar, remover...) não muda: nº de quadros, atraso e duração do vídeo e
+    os pacotes do áudio (copiado sem reencode nessas edições; MD5 dos pacotes da 1ª faixa)."""
+    ident = _identidade(arq)
+    chave = (str(arq), ident["tamanho"], ident["mtime"])
+    if chave in _LINHAS_TEMPO:
+        return _LINHAS_TEMPO[chave]
+    md5 = None
+    if info.get("auds"):
+        r = subprocess.run(core.FFMPEG + ["-i", str(arq), "-map", "0:a:0", "-c", "copy", "-f", "md5", "-"],
+                           capture_output=True, text=True)
+        if r.returncode == 0 and "MD5=" in r.stdout:
+            md5 = r.stdout.strip().split("MD5=", 1)[1][:32]
+    lt = {"quadros": _total_quadros(info), "taxa": str(info["taxa"]), "atraso": round(info["atraso_video"], 4),
+          "dur_video": round(_duracao_video(info), 4), "audio_md5": md5}
+    _LINHAS_TEMPO[chave] = lt
+    return lt
+
+
+def _assinatura_fonte(entrada: Path, info: dict) -> dict:
+    """Campos do .json da máscara que identificam o arquivo de onde ela saiu (ver `_conferir_mascara`)."""
+    return {"fonte": str(entrada), "fonte_id": _identidade(entrada), "linha_tempo": _linha_do_tempo(entrada, info)}
 
 
 def listar_mascaras(doc: Documento) -> list[dict]:
@@ -862,38 +1202,79 @@ def ler_mascara(doc: Documento, mascara: str | None = None) -> dict:
 
 
 def _conferir_mascara(m: dict, info: dict, entrada: Path) -> list[str]:
-    """A máscara vale para o vídeo atual? (mesmo tamanho, mesma taxa, trecho dentro da duração)."""
-    if (m["largura"], m["altura"]) != (info["w"], info["h"]):
+    """A máscara vale para o vídeo atual? ERRO se o tamanho/taxa mudou ou se a linha do tempo mudou desde que ela foi
+    calculada (corte, velocidade, `salvar` de uma versão cortada, `desfazer` + outra edição...). Aceita outro arquivo
+    (outra versão, ou o original depois de `salvar`) só se as edições entre eles foram SÓ de quadros: mesmo nº de
+    quadros, mesmo atraso e mesmos pacotes de áudio. Devolve avisos."""
+    av_tam = []
+    if (m["largura"] - m["largura"] % 2, m["altura"] - m["altura"] % 2) == (info["w"], info["h"]) != \
+            (m["largura"], m["altura"]):
+        av_tam = [f"máscara {m['id']} feita em {m['largura']}x{m['altura']}, ajustada para {info['w']}x{info['h']} "
+                  f"(dimensão ímpar arredondada pela versão anterior)"]
+    elif (m["largura"], m["altura"]) != (info["w"], info["h"]):
         raise ValueError(f"a máscara {m['id']} foi feita num vídeo {m['largura']}x{m['altura']} e o atual é "
                          f"{info['w']}x{info['h']}: segmente de novo")
-    if abs(float(m["fps"]) - info["fps"]) > 0.01:
-        raise ValueError(f"a máscara {m['id']} foi feita a {m['fps']} fps e o vídeo atual tem {info['fps']:g}: "
-                         f"segmente de novo")
-    if m["quadro_inicial"] + m["quadros"] > _total_quadros(info) + 1:
+    if str(m.get("taxa")) != str(info["taxa"]) and abs(float(m["fps"]) - _fps(info)) > 1e-3:
+        raise ValueError(f"a máscara {m['id']} foi feita a {float(m['fps']):g} fps e o vídeo atual tem "
+                         f"{_fps(info):g}: segmente de novo")
+    if not m.get("fonte_id") or not m.get("linha_tempo"):
+        raise ValueError(f"a máscara {m['id']} não registra de que arquivo veio (formato antigo): segmente de novo")
+    if m["quadro_inicial"] + m["quadros"] > _total_quadros(info):
         raise ValueError(f"a máscara {m['id']} passa do fim do vídeo atual (a linha do tempo mudou?): "
                          f"segmente de novo")
-    av = []
-    if m.get("fonte") != str(entrada):
-        av.append(f"máscara {m['id']} calculada em {Path(m['fonte']).name}, aplicada em {entrada.name} "
-                  f"(mesmo tamanho e fps; se a linha do tempo mudou, segmente de novo)")
-    return av
+    try:
+        mesmo = _identidade(entrada)["hash"] == m["fonte_id"]["hash"]
+    except OSError:
+        mesmo = False
+    if mesmo:
+        return av_tam
+    antes, agora = m["linha_tempo"], _linha_do_tempo(entrada, info)
+    mudou = [k for k in ("quadros", "taxa") if str(antes.get(k)) != str(agora.get(k))]
+    if abs(float(antes.get("atraso", 0)) - float(agora["atraso"])) > 0.5 / _fps(info):
+        mudou.append("atraso")
+    if antes.get("audio_md5") != agora.get("audio_md5"):
+        mudou.append("áudio")
+    if mudou:
+        raise ValueError(f"a linha do tempo mudou desde que a máscara {m['id']} foi calculada em "
+                         f"{Path(m['fonte']).name} ({', '.join(mudou)} diferente: corte, velocidade ou salvar de uma "
+                         f"versão editada?): segmente de novo")
+    if agora.get("audio_md5"):
+        return av_tam + [f"máscara {m['id']} calculada em {Path(m['fonte']).name}, aplicada em {entrada.name}: só a imagem "
+                f"mudou entre os dois (mesmos quadros e mesmo áudio)"]
+    return av_tam + [f"máscara {m['id']} calculada em {Path(m['fonte']).name}, aplicada em {entrada.name}: mesmo nº de "
+            f"quadros, mas sem áudio para confirmar que a linha do tempo é a mesma; confira com `destacar_objeto`"]
+
+
+SEGMENTAR_MAX_SEM_TRECHO = 300  # quadros; acima disso, sem `inicio`/`fim`, pede confirmar=True
+_SAM_S_POR_QUADRO = (1.5, 3.5)  # medido na máquina alvo (720p–1080p, 4 threads)
 
 
 def segmentar(doc: Documento, tempo: float, pontos=None, pontos_negativos=None, caixa=None,
               inicio: float | None = None, fim: float | None = None, extras: list[dict] | None = None,
-              modelo: str = MODELO_SAM_PADRAO, passo_quadros: int = 1, progresso=None, cancelar=None,
-              etapa=None) -> dict:
-    """Segmenta um objeto e o rastreia de `inicio` a `fim` (padrão: o vídeo todo).
+              modelo: str = MODELO_SAM_PADRAO, passo_quadros: int = 1, confirmar: bool = False, progresso=None,
+              cancelar=None, etapa=None) -> dict:
+    """Segmenta um objeto e o rastreia de `inicio` a `fim` (sem os dois: o vídeo todo, que acima de
+    SEGMENTAR_MAX_SEM_TRECHO quadros exige confirmar=True — dá erro com a estimativa de tempo).
 
-    Prompt no quadro exibido em `tempo`: `pontos` (positivos, no objeto), `pontos_negativos` (fora dele) e/ou
-    `caixa` [x, y, largura, altura]; pixels do vídeo exibido ou frações 0–1. `extras`: prompts em outros
-    quadros [{tempo, pontos, pontos_negativos, caixa}] (para corrigir onde o rastreamento errou).
-    A propagação vai para a frente e para trás a partir do primeiro quadro com prompt. `passo_quadros`=k roda o
-    SAM a cada k quadros (os do meio repetem a máscara anterior; k vezes mais rápido, menos preciso).
-    Grava a máscara (FFV1 cinza) + .json em `.versoes/mascaras/` e devolve resumo + quadros de conferência."""
+    Prompt no quadro exibido em `tempo` (que tem de estar dentro de [inicio, fim]): `pontos` (positivos, no objeto),
+    `pontos_negativos` (fora dele) e/ou `caixa` [x, y, largura, altura]. Coordenadas: de preferência FRAÇÕES 0–1 do
+    quadro (independem da miniatura); pixels do vídeo exibido também valem. `extras`: prompts em outros quadros
+    [{tempo, pontos, pontos_negativos, caixa}] (para corrigir onde o rastreamento errou).
+    A propagação vai para a frente e para trás a partir do primeiro quadro com prompt; nos quadros sem prompt, o
+    prompt sai da máscara do quadro vizinho (caixa ampliada + ponto interno). `passo_quadros`=k roda o SAM a cada k
+    quadros (os do meio repetem a máscara anterior; k vezes mais rápido, menos preciso).
+    Grava a máscara (FFV1 cinza) + .json em ~/.cache/ai-editor/mascaras/<hash do original>/ e devolve resumo +
+    quadros de conferência."""
     if np is None:
         raise IAIndisponivel(DICA_IA)
     _ort()
+    with trava_ia(cancelar, etapa):
+        return _segmentar(doc, tempo, pontos, pontos_negativos, caixa, inicio, fim, extras, modelo, passo_quadros,
+                          confirmar, progresso, cancelar, etapa)
+
+
+def _segmentar(doc, tempo, pontos, pontos_negativos, caixa, inicio, fim, extras, modelo, passo_quadros, confirmar,
+               progresso, cancelar, etapa) -> dict:
     cancelar = cancelar or (lambda: False)
     etapa = etapa or (lambda _t: None)
     prog = progresso or (lambda _f: None)
@@ -906,6 +1287,11 @@ def segmentar(doc: Documento, tempo: float, pontos=None, pontos_negativos=None, 
     i1 = total if fim is None else max(i0 + 1, min(total, _primeiro_quadro_desde(info, fim)))
     n = i1 - i0
     passo_quadros = max(1, int(passo_quadros or 1))
+    if inicio is None and fim is None and n > SEGMENTAR_MAX_SEM_TRECHO and not confirmar:
+        k = n / passo_quadros
+        raise ValueError(f"sem `inicio`/`fim` o rastreamento cobre o vídeo todo: {n} quadros, ~"
+                         f"{k * _SAM_S_POR_QUADRO[0] / 60:.0f}–{k * _SAM_S_POR_QUADRO[1] / 60:.0f} min em CPU. Indique o "
+                         f"trecho onde o objeto aparece (inicio/fim) ou passe confirmar=True")
 
     prompts: dict[int, dict] = {}
     for p in [{"tempo": tempo, "pontos": pontos, "pontos_negativos": pontos_negativos, "caixa": caixa}] + \
@@ -918,7 +1304,11 @@ def segmentar(doc: Documento, tempo: float, pontos=None, pontos_negativos=None, 
         if not pos and not cx and not prompts:
             raise ValueError("o primeiro prompt precisa de pelo menos um ponto positivo ou uma caixa")
         t = float(p.get("tempo") if p.get("tempo") is not None else tempo)
-        q = min(i1 - 1, max(i0, _quadro_em(info, t)))
+        q = _quadro_em(info, t)
+        if not i0 <= q < i1:
+            raise ValueError(f"o tempo do prompt ({fmt_tempo(t)}) está fora do trecho a rastrear "
+                             f"({fmt_tempo(_tempo_do_quadro(info, i0))} → {fmt_tempo(_tempo_do_quadro(info, i1))}): "
+                             f"ajuste `tempo` ou `inicio`/`fim`")
         d = prompts.setdefault(q, {"pos": [], "neg": [], "caixa": None})
         d["pos"] += pos
         d["neg"] += neg
@@ -929,8 +1319,8 @@ def segmentar(doc: Documento, tempo: float, pontos=None, pontos_negativos=None, 
 
     etapa(f"modelo {modelo}")
     sam_pronto = modelo_pronto(modelo)
-    sam = None
-    esperar_memoria(cancelar=cancelar, aviso=etapa)
+    if not (sam_pronto and _sessao_carregada(_pasta_modelo(modelo) / "vision_encoder.onnx")):
+        esperar_memoria(cancelar=cancelar, aviso=etapa)
     sam = SAM(modelo, (lambda f: prog(0.05 * f)) if not sam_pronto else None, cancelar)
     prog(0.05)
 
@@ -956,6 +1346,8 @@ def segmentar(doc: Documento, tempo: float, pontos=None, pontos_negativos=None, 
     def contar():
         feitos[0] += 1
         prog(0.05 + 0.93 * feitos[0] / n)
+        if feitos[0] % 5 == 0:
+            _pausa_memoria(cancelar, etapa)
         if feitos[0] % 5 == 0 or feitos[0] == n:
             seg = (time.monotonic() - t_ini) / feitos[0]
             etapa(f"segmentando quadro {feitos[0]}/{n} ({seg:.1f} s/quadro, faltam ~{seg * (n - feitos[0]):.0f} s)")
@@ -990,8 +1382,7 @@ def segmentar(doc: Documento, tempo: float, pontos=None, pontos_negativos=None, 
             fim_bloco = ip + 1  # inclui o quadro do prompt (ponto de partida; não é gravado deste lado)
             while fim_bloco > i0:
                 ini_bloco = max(i0, fim_bloco - 30)
-                leitor = _Leitor(_cmd_ler_video(entrada, info, _ss_do_quadro(info, ini_bloco), fim_bloco - ini_bloco,
-                                                (_LADO, _LADO)), _LADO, _LADO, 3)
+                leitor, _ = _abrir_video(entrada, info, ini_bloco, fim_bloco - ini_bloco, (_LADO, _LADO))
                 bloco = []
                 try:
                     while (q := leitor.ler()) is not None:
@@ -1027,8 +1418,7 @@ def segmentar(doc: Documento, tempo: float, pontos=None, pontos_negativos=None, 
         try:
             for k in range(n_tras):
                 esc.escrever(_mascara_cheia(np.asarray(tras[k]), w, h))
-            leitor = _Leitor(_cmd_ler_video(entrada, info, _ss_do_quadro(info, ip), i1 - ip, (_LADO, _LADO)),
-                             _LADO, _LADO, 3)
+            leitor, _ = _abrir_video(entrada, info, ip, i1 - ip, (_LADO, _LADO))
             anterior, ultimo_logits = None, None
             try:
                 i = ip
@@ -1078,8 +1468,8 @@ def segmentar(doc: Documento, tempo: float, pontos=None, pontos_negativos=None, 
             partes.append("caixa")
         desc_prompt.append(f"{fmt_tempo(_tempo_do_quadro(info, q))}: {' + '.join(partes)}")
     meta = {
-        "id": mid, "arquivo": final.name, "fonte": str(entrada), "modelo": modelo,
-        "largura": w, "altura": h, "fps": info["fps"], "taxa": info["taxa"],
+        "id": mid, "arquivo": final.name, **_assinatura_fonte(entrada, info), "modelo": modelo,
+        "largura": w, "altura": h, "fps": _fps(info), "taxa": info["taxa"],
         "quadro_inicial": i0, "quadros": n,
         "inicio": fmt_tempo(_tempo_do_quadro(info, i0)), "fim": fmt_tempo(_tempo_do_quadro(info, i1)),
         "inicio_s": _tempo_do_quadro(info, i0), "fim_s": _tempo_do_quadro(info, i1),
@@ -1114,62 +1504,185 @@ def segmentar(doc: Documento, tempo: float, pontos=None, pontos_negativos=None, 
 
 
 # ---------------------------------------------------------------- aplicar a máscara (versões e exportação)
-def _cmd_versao(info: dict, entrada: Path, saida: Path) -> list[str]:
-    """ffmpeg que recebe os quadros rgb24 pelo stdin e copia áudio/legendas da entrada (como _editar_quadros)."""
-    return (core.FFMPEG + ["-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{info['w']}x{info['h']}",
-                           "-r", info["taxa"], "-i", "-", "-i", str(entrada), "-map", "0:v"]
-            + core._mapas_copia(info, entrada, saida, "1")
+_FORMATO_OVERLAY = {  # pix_fmt da origem → (format do overlay, pix_fmt com alfa da camada processada)
+    "yuv420p": ("yuv420", "yuva420p"), "yuvj420p": ("yuv420", "yuva420p"),
+    "yuv422p": ("yuv422", "yuva422p"), "yuvj422p": ("yuv422", "yuva422p"),
+    "yuv444p": ("yuv444", "yuva444p"), "yuvj444p": ("yuv444", "yuva444p"),
+    "yuv420p10le": ("yuv420p10", "yuva420p10le"), "yuv422p10le": ("yuv422p10", "yuva422p10le"),
+    "yuv444p10le": ("yuv444p10", "yuva444p10le"),
+}
+
+
+def _cmd_versao(info: dict, entrada: Path, saida: Path, i0: int, n: int) -> list[str]:
+    """ffmpeg da versão: o vídeo INTEIRO vem da entrada no caminho yuv nativo (sem passar por RGB; 10 bits e matriz
+    preservados) e só o trecho [i0, i0+n) é trocado pelos quadros processados (rgb24 pelo stdin), convertidos com a
+    MESMA matriz/faixa da origem e postos por cima com `overlay` no tempo certo: `settb=AVTB,setpts` põe o quadro k
+    em t(i0+k) − 1/4 de quadro (o `-itsoffset` não serve: o ffmpeg o desconta como início da entrada; e na base de
+    tempo 1/fps o 1/4 de quadro some no arredondamento). Quadros em RGBA: o escritor recebe n+1 quadros, o último
+    TRANSPARENTE, senão o overlay solta o último quadro do trecho ao ver o fim da entrada (e `enable=` não serve: o
+    `t` dele segue o quadro mais novo da 2ª entrada). Antes do 1º quadro e depois do fim (`eof_action=pass`) a
+    origem passa intacta. `-fps_mode passthrough` mantém os tempos da origem (start_time do vídeo, VFR).
+    Áudio/legendas copiados."""
+    fps = _fps(info)
+    mat, faixa = _cor(info)
+    t0 = _tempo_do_quadro(info, i0)
+    fmt_ov, pix_camada = _FORMATO_OVERLAY.get(info.get("pix_fmt", ""), ("auto", "yuva444p"))
+    if fmt_ov == "auto" and core._10bits(info.get("pix_fmt", "")):
+        fmt_ov, pix_camada = "yuv420p10", "yuva420p10le"
+    base = f"[1:V:0]{info['pre']}[base]" if info.get("pre") else "[1:V:0]null[base]"
+    grafo = [base,
+             f"[0:v]settb=AVTB,setpts=PTS-STARTPTS+{max(0.0, t0 - 0.25 / fps):.6f}/TB,"
+             f"scale=out_color_matrix={mat}:out_range={faixa}:flags={_FLAGS_GRAVAR},format={pix_camada}[proc]",
+             f"[base][proc]overlay=eof_action=pass:repeatlast=0:format={fmt_ov},setsar=1"
+             + (f",{core._PAR_FILTRO}" if info["w"] % 2 or info["h"] % 2 else "") + "[vo]"]
+    return (core.FFMPEG + ["-progress", "pipe:1", "-nostats",
+                           "-f", "rawvideo", "-pix_fmt", "rgba", "-s", f"{info['w']}x{info['h']}",
+                           "-r", info["taxa"], "-i", "-"]
+            + info["dec"] + ["-i", str(entrada), "-filter_complex", ";".join(grafo), "-map", "[vo]"]
+            + core._mapas_copia(info, entrada, saida, "1") + ["-fps_mode", "passthrough"]
             + core._args_video_edicao(saida.suffix, info) + core._tags_faixa(info["v"], "s:v:0")
             + ["-map_metadata", "1"] + core._faststart(saida) + [str(saida)])
+
+
+# ---- versões gravadas por tarefa: trava do documento + reserva do vNNN
+_ORFAO_S = 600  # vNNN sem registro no histórico e parado há 10 min = sobra de processo morto
+
+
+def _pid_vivo(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+@contextlib.contextmanager
+def _gravando_versao(doc: Documento, descricao: str):
+    """Trava do documento enquanto a tarefa grava uma versão: `.versoes/.trava` criado com O_EXCL (pid, thread,
+    tarefa). `Documento.proxima_saida/registrar/desfazer/salvar/descartar` (core) recusam com
+    "tarefa X está gravando uma versão" enquanto ela existir e o dono estiver vivo; trava de processo/thread morto
+    é ignorada e substituída."""
+    doc.pasta.mkdir(exist_ok=True)
+    trava = doc.pasta / ".trava"
+    t = getattr(_IA_LOCAL, "tarefa", None)
+    dados = {"pid": os.getpid(), "thread": threading.get_ident(), "tarefa": t.id if t else "direta",
+             "descricao": descricao, "desde": time.strftime("%Y-%m-%dT%H:%M:%S")}
+    for _ in range(3):
+        try:
+            fd = os.open(trava, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            outra = core.Documento._ler_trava(trava)
+            if outra is None:  # dono morto (ou arquivo ilegível): substitui
+                trava.unlink(missing_ok=True)
+                continue
+            raise RuntimeError(f"tarefa {outra.get('tarefa')} está gravando uma versão ({outra.get('descricao')}); "
+                               f"espere terminar (`tarefas`) ou cancele") from None
+        with os.fdopen(fd, "w") as f:
+            json.dump(dados, f)
+        break
+    else:
+        raise RuntimeError(f"não consegui travar {doc.pasta} para gravar a versão")
+    try:
+        yield
+    finally:
+        trava.unlink(missing_ok=True)
+        with contextlib.suppress(OSError):
+            doc.pasta.rmdir()  # só se ficou vazia (nenhuma versão)
+
+
+def _limpar_versoes_orfas(doc: Documento) -> None:
+    """vNNN.* na pasta de versões que não está no histórico e não muda há 10 min: sobra de processo morto."""
+    if not doc.pasta.is_dir():
+        return
+    registrados = {v["arquivo"] for v in doc._ler()["versoes"]}
+    agora = time.time()
+    for f in doc.pasta.iterdir():
+        if re.fullmatch(r"v\d{3,}\.\w+", f.name) and f.name not in registrados:
+            with contextlib.suppress(OSError):
+                if agora - f.stat().st_mtime > _ORFAO_S:
+                    f.unlink()
+
+
+def _reservar_versao(doc: Documento) -> Path:
+    """Próximo vNNN livre, criado com O_EXCL (nenhuma outra edição pega o mesmo nome)."""
+    ext = doc.atual().suffix.lower()
+    ext = ext if ext in core._CONTEINERES_EDICAO else ".mp4"
+    doc.pasta.mkdir(exist_ok=True)
+    n = len(doc._ler()["versoes"]) + 1
+    while True:
+        p = doc.pasta / f"v{n:03d}{ext}"
+        if not any(doc.pasta.glob(f"v{n:03d}.*")):
+            try:
+                os.close(os.open(p, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644))
+                return p
+            except FileExistsError:
+                pass
+        n += 1
 
 
 def _versao_com_mascara(doc: Documento, m: dict, fn, descricao: str, progresso=None, cancelar=None,
                         etapa=None, info: dict | None = None, avisos: list[str] | None = None,
                         detalhes: dict | None = None, vazio_tambem: bool = False) -> dict:
-    """Relê o vídeo inteiro quadro a quadro; nos quadros do trecho da máscara aplica fn(quadro, mascara, k)
-    (quadro uint8 HxWx3, máscara uint8 HxW, k = índice no trecho) e grava uma nova versão."""
+    """Nova versão: SÓ os quadros do trecho da máscara passam pelo Python — fn(quadro, mascara, k) (quadro uint8
+    HxWx3, máscara uint8 HxW, k = índice no trecho) — e o resto do vídeo segue no ffmpeg pelo caminho yuv nativo
+    (`_cmd_versao`). Durante a gravação o documento fica travado (`_gravando_versao`); se a versão atual mudar
+    mesmo assim, o resultado é descartado."""
     cancelar = cancelar or (lambda: False)
     entrada = doc.atual()
     info = info or core._midia(entrada)
-    avisos = list(avisos or []) + _conferir_mascara(m, info, entrada)
+    avisos = list(avisos or []) + _conferir_mascara(m, info, entrada) + _avisos_cor(info)
     w, h = info["w"], info["h"]
-    total = _total_quadros(info)
     i0, n = m["quadro_inicial"], m["quadros"]
-    saida = core._saida_edicao(doc)
-    cmd_ler = _cmd_ler_video(entrada, info)
-    cmd_esc = _cmd_versao(info, entrada, saida)
-    leitor = _Leitor(cmd_ler, w, h, 3)
-    lm = _Leitor(_cmd_ler_mascara(Path(m["caminho"])), w, h, 1)
-    esc = _Escritor(cmd_esc)
+    dur = max(0.001, info["dur"])
     t_ini = time.monotonic()
-    try:
-        i = 0
-        while (q := leitor.ler()) is not None:
-            if cancelar():
-                raise Cancelado("cancelado")
-            k = i - i0
-            if 0 <= k < n:
+    with _gravando_versao(doc, descricao):
+        _limpar_versoes_orfas(doc)
+        if doc.atual() != entrada:
+            raise RuntimeError("a versão atual mudou antes de começar; tente de novo")
+        saida = _reservar_versao(doc)
+        cmd_esc = _cmd_versao(info, entrada, saida, i0, n)
+        leitor, cmd_ler = _abrir_video(entrada, info, i0, n)
+        lm = _Leitor(_cmd_ler_mascara(Path(m["caminho"]), (w, h)), w, h, 1)
+        esc = _Escritor(cmd_esc, (lambda s: progresso(min(0.99, s / dur))) if progresso else None)
+        try:
+            ultimo = None
+            rgba = np.full((h, w, 4), 255, np.uint8)
+            for k in range(n):
+                if cancelar():
+                    raise Cancelado("cancelado")
+                q = leitor.ler()
+                if q is None:  # o vídeo acabou antes (VFR/arredondamento): repete o último quadro
+                    if ultimo is None:
+                        break
+                    q = ultimo
+                ultimo = q
                 mk = lm.ler()
                 if mk is not None and (vazio_tambem or mk.any()):
                     q = fn(q, mk, k)
-                if etapa and (k % 10 == 0):
+                rgba[..., :3] = q
+                esc.escrever(rgba)
+                if etapa and k % 10 == 0:
                     etapa(f"quadro {k + 1}/{n} do trecho")
-            esc.escrever(q)
-            i += 1
-            if progresso and i % 5 == 0:
-                progresso(min(0.99, i / total))
-        leitor.fechar(conferir=True)
-        lm.fechar()
-        esc.fechar()
-        if not saida.exists() or saida.stat().st_size == 0:
-            raise core.ErroFFmpeg(f"o ffmpeg terminou mas não gerou {saida.name}")
-    except BaseException:
-        esc.abortar()
-        leitor.fechar()
-        lm.fechar()
-        saida.unlink(missing_ok=True)
-        raise
-    v = doc.registrar(saida, descricao, [cmd_ler, _cmd_ler_mascara(Path(m["caminho"])), cmd_esc])
+            esc.escrever(np.zeros((h, w, 4), np.uint8))  # quadro extra transparente: ver _cmd_versao
+            leitor.fechar()
+            lm.fechar()
+            if etapa:
+                etapa("gravando o resto do vídeo (sem reprocessar)")
+            esc.fechar(cancelar)
+            if not saida.exists() or saida.stat().st_size == 0:
+                raise core.ErroFFmpeg(f"o ffmpeg terminou mas não gerou {saida.name}")
+            if doc.atual() != entrada:
+                raise RuntimeError("a versão atual mudou enquanto a tarefa rodava (desfazer/outra edição); "
+                                   "resultado descartado — refaça")
+            v = doc.registrar(saida, descricao, [cmd_ler, _cmd_ler_mascara(Path(m["caminho"]), (w, h)), cmd_esc])
+        except BaseException:
+            esc.abortar()
+            leitor.fechar()
+            lm.fechar()
+            saida.unlink(missing_ok=True)
+            raise
     v = dict(v)
     det = {"mascara": m["id"], "trecho": f"{m['inicio']} → {m['fim']}", "segundos": round(time.monotonic() - t_ini, 1)}
     det.update(detalhes or {})
@@ -1285,6 +1798,7 @@ _FORMATOS_RECORTE = {
     "mascara": (".mp4", "gray", ["-c:v", "libx264", "-crf", "12", "-preset", "veryfast", "-pix_fmt", "yuv420p"],
                 ["-c:a", "aac", "-b:a", "192k"]),
 }
+_PIX_RECORTE = {"webm": "yuva420p", "mov": "yuva444p10le", "prores": "yuva444p10le", "mascara": "yuv420p"}
 _FORMATOS_RECORTE["prores"] = _FORMATOS_RECORTE["mov"]
 
 
@@ -1305,23 +1819,31 @@ def recortar(doc: Documento, mascara: str | None = None, formato: str = "webm", 
     avisos = _conferir_mascara(m, info, entrada)
     w, h = info["w"], info["h"]
     i0, n = m["quadro_inicial"], m["quadros"]
-    ss = _ss_do_quadro(info, i0)
-    dur = n / info["fps"]
+    t_audio = _tempo_do_quadro(info, i0)  # áudio começa no tempo EXATO do 1º quadro (o -ss do vídeo é 1/4 antes)
+    dur = n / _fps(info)
+    mat, faixa = _cor(info)
     sufixo = {"webm": "recorte", "mov": "recorte", "prores": "recorte", "mascara": "mascara"}[formato]
-    if inverter and formato != "mascara":
-        sufixo = "sem_objeto"
+    if inverter:
+        sufixo = "mascara_invertida" if formato == "mascara" else "sem_objeto"
     final = core._reservar(core._caminho(doc.original, f"{sufixo}.{m['id']}", ext, destino, criar=True))
     tmp = core._temporario(final)
     cmd_esc = core.FFMPEG + ["-f", "rawvideo", "-pix_fmt", "rgba" if modo_pix == "rgba" else "gray",
                              "-s", f"{w}x{h}", "-r", info["taxa"], "-i", "-"]
     tem_audio = audio and bool(info["auds"])
     if tem_audio:
-        cmd_esc += ["-ss", f"{ss:.6f}", "-t", f"{dur:.6f}", "-i", str(entrada), "-map", "0:v", "-map", "1:a:0"] + args_a
+        cmd_esc += ["-ss", f"{t_audio:.6f}", "-t", f"{dur:.6f}", "-i", str(entrada), "-map", "1:a:0"] + args_a
+    # rgb → yuv com a matriz/faixa da origem (e tags iguais); máscara: cinza puro, sempre faixa limitada BT.709
+    if modo_pix == "rgba":
+        vf = f"scale=out_color_matrix={mat}:out_range={faixa},format={_PIX_RECORTE[formato]}"
+        tags = _tags_cor_saida(info)
     else:
-        cmd_esc += ["-map", "0:v"]
-    cmd_esc += args_v + core._faststart(final) + ["-f", {".webm": "webm", ".mov": "mov", ".mp4": "mp4"}[ext], str(tmp)]
-    leitor = _Leitor(_cmd_ler_video(entrada, info, ss, n), w, h, 3) if modo_pix == "rgba" else None
-    lm = _Leitor(_cmd_ler_mascara(Path(m["caminho"])), w, h, 1)
+        vf = f"scale=out_color_matrix=bt709:out_range=tv,format={_PIX_RECORTE[formato]}"
+        tags = ["-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709", "-color_range", "tv"]
+    vf = ("scale=trunc(iw/2)*2:trunc(ih/2)*2," if w % 2 or h % 2 else "") + vf + ",setsar=1"
+    cmd_esc += ["-map", "0:v", "-vf", vf] + args_v + tags
+    cmd_esc += core._faststart(final) + ["-f", {".webm": "webm", ".mov": "mov", ".mp4": "mp4"}[ext], str(tmp)]
+    leitor = _abrir_video(entrada, info, i0, n)[0] if modo_pix == "rgba" else None
+    lm = _Leitor(_cmd_ler_mascara(Path(m["caminho"]), (w, h)), w, h, 1)
     esc = _Escritor(cmd_esc)
     try:
         for k in range(n):
@@ -1345,7 +1867,7 @@ def recortar(doc: Documento, mascara: str | None = None, formato: str = "webm", 
         if leitor:
             leitor.fechar()
         lm.fechar()
-        esc.fechar()
+        esc.fechar(cancelar)
         core._publicar(tmp, final)
     except BaseException:
         esc.abortar()
@@ -1365,6 +1887,8 @@ def recortar(doc: Documento, mascara: str | None = None, formato: str = "webm", 
         r["info"] = core.info_arquivo(final)
     except Exception:  # noqa: BLE001
         pass
+    if w % 2 or h % 2:
+        avisos = avisos + [f"dimensão ímpar ({w}x{h}): a saída foi arredondada para pares"]
     if avisos:
         r["avisos"] = avisos
     return r
@@ -1372,12 +1896,16 @@ def recortar(doc: Documento, mascara: str | None = None, formato: str = "webm", 
 
 # ---- remover o objeto (reconstruir o fundo)
 _LAMA_LADO = 512
-_LAMA_S_POR_QUADRO = 5.5  # medido: 4,4–5 s na máquina alvo (4 threads, carregada); usado para estimar e escolher o método
+_LAMA_S_POR_QUADRO = 5.5  # medido: 4,4–5 s/quadro na máquina alvo (4 threads, carregada) + ~10–30 s de carga do modelo
 
 
 def _lama_sessao(progresso=None, cancelar=None):
+    """Sessão do LaMa (~10–30 s para carregar; fica em cache por alguns minutos)."""
     pasta = baixar_modelo("lama", progresso, cancelar)
-    return _sessao(pasta / "inpainting_lama_2025jan.onnx")
+    arq = pasta / "inpainting_lama_2025jan.onnx"
+    if not _sessao_carregada(arq):
+        esperar_memoria(cancelar=cancelar)
+    return _sessao(arq)
 
 
 def _janela_lama(caixa, W: int, H: int) -> tuple[int, int, int, int]:
@@ -1409,7 +1937,7 @@ def _lama_preencher(sessao, img, buraco):
     ch, cw = rec.shape[:2]
     x = np.ascontiguousarray((_redim(rec, _LAMA_LADO, _LAMA_LADO) / 255.0).transpose(2, 0, 1)[None], np.float32)
     mk = (_redim(mb.astype(np.float32), _LAMA_LADO, _LAMA_LADO) > 0.01).astype(np.float32)[None, None]
-    y = sessao.run(None, {"image": x, "mask": mk})[0][0].transpose(1, 2, 0)
+    y = _usar(sessao).run(None, {"image": x, "mask": mk})[0][0].transpose(1, 2, 0)
     y = _redim(np.clip(y, 0, 255), ch, cw)
     alfa = _suave(mb, 2)[..., None]
     alfa = np.maximum(alfa, mb[..., None].astype(np.float32))
@@ -1441,8 +1969,8 @@ def _plano_de_fundo(entrada: Path, info: dict, m: dict, margem: int, cancelar, p
     plano = np.zeros((h, w, 3), np.uint8)
     visto = np.zeros((h, w), bool)
     uniao = np.zeros((h, w), bool)
-    leitor = _Leitor(_cmd_ler_video(entrada, info, _ss_do_quadro(info, i0), n), w, h, 3)
-    lm = _Leitor(_cmd_ler_mascara(Path(m["caminho"])), w, h, 1)
+    leitor, _ = _abrir_video(entrada, info, i0, n)
+    lm = _Leitor(_cmd_ler_mascara(Path(m["caminho"]), (w, h)), w, h, 1)
     ref = ref_vis = None
     movimentos = []
     try:
@@ -1485,12 +2013,18 @@ def remover(doc: Documento, mascara: str | None = None, metodo: str = "auto", ma
       - 'fundo' (câmera parada): o buraco recebe o fundo visto no quadro mais próximo no tempo (o objeto se
         mexendo revela o que está atrás); o que nunca aparece é preenchido UMA vez pelo LaMa e o mesmo remendo
         vale para todos os quadros (estável, sem tremulação, rápido);
-      - 'lama' (câmera em movimento): LaMa em cada quadro, num recorte em volta do objeto (~7 s/quadro em CPU;
-        pode tremular um pouco entre quadros);
+      - 'lama' (câmera em movimento): LaMa em cada quadro, num recorte em volta do objeto (~5,5 s/quadro em CPU,
+        mais ~10–30 s para carregar o modelo; pode tremular um pouco entre quadros);
       - 'rapido': sem modelo, as cores em volta escorrem para dentro (bom para objetos pequenos ou fundo liso);
       - 'auto': mede o movimento da câmera; parada → 'fundo'; em movimento → 'lama' se couber em ~10 min,
         senão 'rapido'.
-    margem: pixels a mais em volta da máscara (padrão 1% do lado menor), cobre borda e borrão de movimento."""
+    margem: pixels a mais em volta da máscara (padrão 1% do lado menor), cobre borda e borrão de movimento.
+    Sem ONNX Runtime: 'auto' vira 'rapido' (com aviso) e 'fundo' preenche o que nunca aparece sem o LaMa."""
+    with trava_ia(cancelar, etapa):
+        return _remover(doc, mascara, metodo, margem, progresso, cancelar, etapa)
+
+
+def _remover(doc, mascara, metodo, margem, progresso, cancelar, etapa) -> dict:
     cancelar = cancelar or (lambda: False)
     etapa = etapa or (lambda _t: None)
     prog = progresso or (lambda _f: None)
@@ -1498,13 +2032,24 @@ def remover(doc: Documento, mascara: str | None = None, metodo: str = "auto", ma
     if metodo not in ("auto", "fundo", "lama", "rapido", "rápido"):
         raise ValueError("metodo: 'auto', 'fundo', 'lama' ou 'rapido'")
     metodo = "rapido" if metodo == "rápido" else metodo
+    avisos: list[str] = []
+    try:
+        _ort()
+        tem_ia = True
+    except IAIndisponivel:
+        tem_ia = False
+        if metodo == "lama":
+            raise
+        if metodo == "auto":
+            metodo = "rapido"
+            avisos.append("sem ONNX Runtime (IA opcional): usei o preenchimento rápido, sem modelo. Para 'fundo'/'lama' "
+                          "com LaMa: " + DICA_IA)
     m = ler_mascara(doc, mascara)
     entrada = doc.atual()
     info = core._midia(entrada)
     w, h = info["w"], info["h"]
     margem = _margem_padrao(w, h) if margem is None else max(0, int(margem))
     detalhes: dict = {"margem_px": margem}
-    avisos: list[str] = []
     n = m["quadros"]
     sessao = None
     if metodo in ("auto", "fundo"):
@@ -1529,11 +2074,13 @@ def remover(doc: Documento, mascara: str | None = None, metodo: str = "auto", ma
         if metodo == "fundo":
             frac = float(nunca.sum() / max(1, uniao.sum()))
             detalhes["area_nunca_vista"] = f"{100 * frac:.1f}%"
-            if nunca.any():
+            if nunca.any() and tem_ia:
                 etapa("LaMa no plano de fundo (área que nunca aparece)")
-                esperar_memoria(cancelar=cancelar, aviso=etapa)
                 sessao = _lama_sessao(None, cancelar)
                 plano = _lama_preencher(sessao, plano, nunca)
+            elif nunca.any():
+                avisos.append("sem ONNX Runtime: a área que nunca aparece foi preenchida sem o LaMa (borrão)")
+                plano = _preencher_rapido_local(plano, nunca)
             prog(0.35)
 
             recente = plano  # fundo visto mais recentemente (começa com o primeiro visto + remendo do LaMa)
@@ -1549,7 +2096,6 @@ def remover(doc: Documento, mascara: str | None = None, metodo: str = "auto", ma
                                        info, avisos, detalhes)
     detalhes["metodo"] = metodo
     if metodo == "lama":
-        esperar_memoria(cancelar=cancelar, aviso=etapa)
         sessao = _lama_sessao(None, cancelar)
         detalhes["estimativa"] = f"~{n * _LAMA_S_POR_QUADRO:.0f} s"
         t0 = time.monotonic()
@@ -1559,6 +2105,7 @@ def remover(doc: Documento, mascara: str | None = None, metodo: str = "auto", ma
             r = _lama_preencher(sessao, q, _dilatar(mk > 127, margem))
             feitos[0] += 1
             if feitos[0] % 3 == 0:
+                _pausa_memoria(cancelar, etapa)
                 s = (time.monotonic() - t0) / feitos[0]
                 etapa(f"LaMa: quadro {k + 1}/{n} ({s:.1f} s/quadro)")
             return np.clip(r, 0, 255).astype(np.uint8)
@@ -1584,9 +2131,13 @@ def ajustar(doc: Documento, mascara: str | None = None, tempo: float | None = No
                          "`caixa`")
     info = core._midia(doc.atual())
     _conferir_mascara(m, info, doc.atual())
+    q = _quadro_em(info, float(tempo))
+    if not m["quadro_inicial"] <= q < m["quadro_inicial"] + m["quadros"]:
+        raise ValueError(f"o tempo {fmt_tempo(float(tempo))} está fora da máscara {m['id']} ({m['inicio']} → "
+                         f"{m['fim']}): para outro trecho, use `segmentar_objeto`")
     extras = []
     for q, p in sorted(m["prompts"].items(), key=lambda x: int(x[0])):
-        t = _tempo_do_quadro(info, int(q)) + 0.5 / info["fps"]
+        t = _tempo_do_quadro(info, int(q)) + 0.5 / _fps(info)
         cx = p.get("caixa")
         extras.append({"tempo": t, "pontos": [list(v) for v in p.get("pos") or []] or None,
                        "pontos_negativos": [list(v) for v in p.get("neg") or []] or None,

@@ -125,13 +125,30 @@ cancelar/fechar/estado, `predefinicao`, `trecho`=índice no combo, `limite_mb`, 
   com a anterior). Pontos/caixa vão em coordenadas 1024 (imagem esticada, sem manter proporção); máscara sai em
   256x256 (logits) e é ampliada por bilinear antes do limiar 0. Ida para trás: blocos de 30 quadros decodificados com
   `-ss` e percorridos ao contrário (nunca `reverse`, que guarda o vídeo todo), logits num `np.memmap` em disco.
-  Quadro ↔ tempo: frames saem em CFR (`-fps_mode cfr -r taxa`), índice i = (t − atraso do vídeo)·fps, e o `-ss` de um
-  quadro é 1/4 de quadro antes dele (`_ss_do_quadro`). Máscaras ficam em `~/.cache/ai-editor/mascaras/<hash>/`, NÃO
+  Quadro ↔ tempo: UMA taxa no módulo todo (`_fps` = `info['taxa']`, também em VFR), total = duração do vídeo × taxa
+  (`_total_quadros`, o leitor sempre passa `-frames:v`); frames saem em CFR, índice i = (t − atraso do vídeo)·fps, e o
+  `-ss` de um quadro é 1/4 de quadro antes dele (`_ss_do_quadro`). Vídeo que começa depois do contêiner: ler COM `-ss`
+  (sem ele o cfr repete o 1º quadro); leitura sem `-ss` leva `setpts=PTS+(0,25/fps − atraso)/TB` para ter a mesma fase
+  da com `-ss`. Em VFR a busca precisa descarta o quadro de origem anterior ao ponto: `_abrir_video` começa até 0,3 s
+  antes e joga fora o excesso. Cor: ler com `in_color_matrix`/`in_range` da origem (`_cor`; sem tag: bt709 se ≥720p,
+  senão bt601) e flags `lanczos+accurate_rnd+full_chroma_int` (sem `full_chroma_int` a ida e volta escurece ~1 nível).
+  Versões (`_cmd_versao`): só o TRECHO passa pelo Python (RGBA num pipe), sobreposto ao vídeo original em yuv nativo
+  (10 bits preservados): `[0:v]settb=AVTB,setpts=PTS-STARTPTS+T/TB,scale=out_color_matrix=..` + `overlay=eof_action=pass`
+  e `-fps_mode passthrough` (mantém start_time e VFR). Armadilhas: `-itsoffset` é ignorado como início da entrada; tb
+  1/30 arredonda o 1/4 de quadro (daí `settb=AVTB`); `enable=` usa o `t` do quadro secundário mais novo (inútil);
+  o overlay perde o último quadro do trecho → mandar n+1 quadros, o último transparente. Trava do documento:
+  `.versoes/.trava` (O_EXCL, pid+thread) enquanto uma tarefa grava; `core.Documento._conferir_trava` recusa
+  registrar/desfazer/descartar/salvar/proxima_saida de outros; vNNN reservado com O_EXCL e base conferida antes de
+  registrar. Máscara guarda a procedência da fonte (`_assinatura_fonte`: tamanho, mtime, hash parcial, linha do tempo
+  com MD5 dos pacotes de áudio): linha do tempo diferente = erro; edição só de imagem = aceita com aviso. Máscaras ficam em `~/.cache/ai-editor/mascaras/<hash>/`, NÃO
   em `.versoes/` (o `desfazer` da última versão apaga a pasta toda). LaMa ONNX tem entrada fixa 512x512 (recorte em
   volta do buraco) e saída já em 0–255; ~4,5–7 s/quadro em 4 threads (os dois exports, opencv e Carve, iguais): por isso
   o padrão para câmera parada é o "fundo visto mais recentemente" + LaMa uma vez no que nunca aparece. Média temporal
   do fundo deixava fantasmas de coisas que passaram. Sem OpenCV: borrão/dilatação por somas acumuladas (`_caixa`).
-  Carregar a sessão do LaMa leva ~20–30 s (otimização do grafo); as sessões ficam em cache no processo do MCP.
+  Carregar a sessão do LaMa leva ~10–30 s (otimização do grafo); as sessões ficam em cache no processo do MCP e são
+  soltas após 5 min ociosas (20 s se MemAvailable < 2,5 GB). Uma IA por vez: `trava_ia` = RLock + flock em
+  `~/.cache/ai-editor/ia.lock` (entre processos), ambos canceláveis na fila; durante a inferência pausa abaixo de
+  1,2 GB livres (`_pausa_memoria`). Modelo pronto = marcador `.ok` (tamanho, mtime, hash).
 - Fala (Fase 6, `fala.py`): `whisper-cli` em `~/.local/share/ai-editor/bin` (compilar: `python -m ai_editor.fala
   --instalar-whisper`; `--status` mostra motor/modelos). Os tempos de segmento do whisper vêm arredondados em janelas de
   ~4 s: use o DTW (`--dtw base` **com `-nfa`**; com flash attention o `t_dtw` sai −1 sem aviso). Não use `--vad` junto:

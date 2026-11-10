@@ -95,9 +95,10 @@ Fala e legendas (Fase 6; `fala.py`; transcrição 100% local com whisper.cpp; mo
 
 Objetos (Fase 7; IA local sob demanda em `objetos.py`; precisa do extra `ia` = ONNX Runtime; operações longas viram
 tarefas: a ferramenta espera até 50 s e, se não terminou, devolve o id da tarefa):
-- `segmentar_objeto(pontos, caixa, pontos_negativos, tempo, inicio, fim, modelo, passo_quadros)`: SAM 2.1 acha o objeto
-  no quadro em `tempo` e o rastreia pelo trecho (para a frente e para trás) → máscara `obj1`, `obj2`... + quadros de
-  conferência com o objeto pintado.
+- `segmentar_objeto(pontos, caixa, pontos_negativos, tempo, inicio, fim, modelo, passo_quadros, confirmar)`: SAM 2.1 acha
+  o objeto no quadro em `tempo` e o rastreia pelo trecho (para a frente e para trás) → máscara `obj1`, `obj2`... + quadros
+  de conferência com o objeto pintado. Coordenadas de preferência em frações 0–1; sem trecho e com > 300 quadros é erro
+  com estimativa de tempo, a menos que `confirmar=True`; `tempo` fora do trecho é erro.
 - `ajustar_mascara(tempo, pontos, pontos_negativos, caixa, mascara)`: refaz com os prompts antigos + os novos (máscara nova).
 - `destacar_objeto(mascara, cor, opacidade, contorno)`: versão de pré-visualização (pintado + contorno).
 - `remover_objeto(mascara, metodo=auto|fundo|lama|rapido, margem)`: versão sem o objeto, fundo reconstruído.
@@ -465,9 +466,12 @@ conferência) → confirma/`ajustar_mascara` → `remover_objeto` / `fundo_objet
   (testado bloqueando o import). Modelos baixados no primeiro uso para `~/.local/share/ai-editor/modelos/<nome>/`, de
   URLs do Hugging Face com **commit fixo**, tamanho e **SHA-256 fixos no código**, `.parcial` + `os.replace`; só
   arquivos `.onnx`/`.onnx_data` (dados), com `ORIGEM.txt` (repo, revisão, licença, hashes). Download do SAM tiny
-  (156 MB) ~55 s, LaMa (93 MB) ~21 s.
-- [x] Inferência com **ONNX Runtime** em CPU (`intra_op_num_threads=4`, sessões em cache no processo). Antes de abrir
-  um modelo confere `MemAvailable` (< 2,5 GB → espera de 60 em 60 s, até 20 min). Uma tarefa de IA por vez (trava).
+  (156 MB) ~55 s, LaMa (93 MB) ~21 s. Bytes limitados ao tamanho esperado, trava por modelo (downloads simultâneos
+  esperam), marcador `.ok` (tamanho, mtime, hash) para `modelo_pronto`, disco cheio com mensagem própria.
+- [x] Inferência com **ONNX Runtime** em CPU (`intra_op_num_threads=4`, sessões em cache no processo, soltas após 5 min
+  ociosas ou 20 s com pouca memória). Antes de abrir um modelo confere `MemAvailable` (< 2,5 GB → solta sessões e espera
+  de 60 em 60 s, até 20 min); durante a inferência pausa abaixo de 1,2 GB e retoma em 1,6 GB. Uma tarefa de IA por vez,
+  também entre processos (flock em `~/.cache/ai-editor/ia.lock`); tarefa cancelada na fila para na hora (0,1 s).
   OpenVINO não foi tentado.
 - [x] `segmentar_objeto`: SAM 2.1 **tiny** (ou `small`) do `onnx-community` — só o modelo de imagem (codificador
   1024x1024 + decodificador de prompts). **Decisão:** a propagação por memória do SAM 2 não está nesse export (os exports
@@ -501,14 +505,30 @@ conferência) → confirma/`ajustar_mascara` → `remover_objeto` / `fundo_objet
   Só no trecho da máscara; quadros sem objeto viram todo fundo.
 - [x] Tarefas longas em segundo plano: `iniciar_tarefa` (thread, progresso, cancelar, fila de 1), ferramenta `tarefas`;
   a barra de status da janela mostra "Claude: segmentando objeto… N%". As ferramentas esperam 50 s antes de devolver o id.
+- [x] Revisão (b74f12f):
+  - Versões só re-processam o TRECHO: os quadros (RGBA) vão por pipe e são sobrepostos (`overlay`) ao vídeo original
+    em yuv nativo, com a matriz de cor da origem, 10 bits preservados fora do trecho, `setsar=1`, start_time e VFR
+    mantidos (`-fps_mode passthrough`). PSNR fora do trecho (opacidade 0): bt709 29,6 → **53,1 dB**, HDR 31,5 → 55,7 dB;
+    dentro, sem viés de cor (41–47 dB). destacar 10 quadros num 720p de 30 s: 6,0 → 4,4 s.
+  - Vídeo que começa depois do contêiner: lido com `-ss`; antes o objeto saía 0,5 s adiantado e a saída perdia o
+    atraso (75 quadros desde 0) → agora no lugar certo, início 0,5 s, 60 quadros. VFR: uma taxa só (total = duração ×
+    taxa): vfr.mp4 60 vs 89 quadros → 84/84; atraso 90 vs 105 → 90/90; vídeo de celular (r=30, média 29,97, 1 quadro
+    perdido) 300/300; leitura com busca = leitura sequencial em todos os arquivos de teste.
+  - Trava do documento `.versoes/.trava` enquanto a tarefa grava: desfazer/salvar/descartar/outras edições dão
+    "tarefa X está gravando uma versão" (antes duas versões saíam ambas como v001); vNNN reservado com O_EXCL, base
+    conferida antes de registrar, trava de processo morto ignorada, versões órfãs e `.parcial.mkv` limpos.
+  - Procedência da máscara no .json (tamanho, mtime, hash parcial, linha do tempo + MD5 do áudio): fonte com linha do
+    tempo diferente → erro (antes aplicava em silêncio); outra versão só com edição de imagem → aceita com aviso.
+  - Dimensões ímpares arredondadas para par (versão e recorte); recorte com tags/matriz certas e áudio no quadro exato;
+    máscara invertida com nome próprio; sem ONNX Runtime `auto` vira `rapido` com aviso antes da passada.
+  - `ver_quadros` informa a resolução real e a escala da miniatura; `[[1,1]]` (ambíguo) é erro.
 - Limitações: SAM roda ~2–4 s/quadro (3 s de vídeo ≈ 3–6 min); rastreamento sem memória pode trocar de objeto se outro
   parecido encostar, ou perder o objeto em oclusão total (o quadro fica vazio e o próximo tenta de novo com a última
-  caixa; corrigir com `ajustar_mascara`); LaMa ~4,5–7 s/quadro e pode tremular entre quadros; `fundo` assume câmera parada
-  e iluminação constante; o vídeo passa por rgb24 (10 bits vira 8; SAR/rotação já aplicados como na Fase 3) e é
-  re-encodado inteiro (x264 CRF 18; PSNR fora do trecho 43,7 dB); VFR vira CFR; tarefas vivem no processo do MCP
-  (reiniciar o MCP perde as tarefas, não as máscaras); edições feitas por outras ferramentas enquanto uma tarefa roda
-  não são bloqueadas. A máscara vale para o vídeo atual se tamanho e fps baterem e o trecho couber (aviso se calculada
-  em outra versão).
+  caixa; corrigir com `ajustar_mascara`); LaMa ~5,5 s/quadro (+10–30 s de carga) e pode tremular entre quadros; `fundo` assume câmera
+  parada e iluminação constante; o TRECHO passa por RGB 8 bits (aviso em 10 bits/HDR, sem conversão de tom); o vídeo
+  inteiro ainda é re-encodado (em yuv nativo, sem cópia); tarefas vivem no processo do MCP (reiniciar o MCP perde as
+  tarefas, não as máscaras); "edição só de imagem" é detectada pelo MD5 do áudio: vídeo sem áudio aceita a máscara com
+  aviso se quadros/taxa baterem.
 
 ### Fase 8 — Distribuição
 - [x] Ponto de entrada único `ai-editor` (`cli.py`): `[arquivo]` abre a janela, `--mcp`, `--diagnostico`,
@@ -681,6 +701,7 @@ Lista completa e links de código-fonte: `packaging/LICENCAS_TERCEIROS.md` e `CO
 - 2026-11-10: combinação inválida de predefinição e extensão (ex.: youtube → `.webm`, whatsapp → `.gif`) dá erro claro em vez de trocar a extensão: o destino pedido nunca é alterado em silêncio. Largura/altura ímpares são arredondadas para par. Foto em 'fim' ou além do fim = último quadro (com aviso se passou), descontando o atraso do vídeo no contêiner como `congelar_quadro`. Trecho com fim ≤ início é erro; trecho cortado pelo fim do vídeo gera aviso. Pelo MCP, se `arquivo` não é o vídeo da janela, tempos relativos à janela ('m1', 'atual', 'in'...) são erro.
 
 - 2026-11-10: Fase 7 com SAM 2.1 só de imagem + rastreamento quadro a quadro (sem a memória de vídeo do SAM 2, ausente nos exports ONNX confiáveis); remoção padrão por "fundo visto mais recente" + LaMa uma vez (câmera parada), LaMa por quadro só para câmera em movimento; máscaras no cache, fora de `.versoes/`; ferramentas longas viram tarefas após 50 s de espera.
+- 2026-11-10: revisão da Fase 7 — versões sobrepõem só o trecho processado ao vídeo original (overlay em yuv nativo) em vez de passar tudo por RGB; trava `.versoes/.trava` checada pelo `core` em registrar/desfazer/descartar/salvar; máscara com procedência da fonte (linha do tempo diferente = erro); uma taxa por vídeo também em VFR; segmentar o vídeo todo acima de 300 quadros exige `confirmar=True`.
 
 ## 8. Questões em aberto
 - Manter o idioma da interface em português ou adicionar i18n desde já?

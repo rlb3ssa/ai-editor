@@ -204,6 +204,17 @@ async def ver_quadros(tempos: list[str | float] | None = None, largura: int = 96
         largura = min(largura, 480)
     tmp = Path(tempfile.mkdtemp(prefix="quadros-", dir=core.RUNTIME_DIR))
     saida: list = []
+    try:  # resolução real x miniatura (para coordenadas de segmentar_objeto/borrar_area)
+        info = core._midia(arq)
+        w, h = info["w"], info["h"]  # como exibido (rotação e pixel não quadrado aplicados)
+        sw, sh = core._dimensoes(info["v"])  # a miniatura sai do tamanho armazenado
+        lw = min(largura, sw)
+        lh = max(2, round(sh * lw / sw / 2) * 2)
+        esc = f"{w / lw:.3f}" if abs(w / lw - h / lh) < 0.01 else f"x {w / lw:.3f}, y {h / lh:.3f}"
+        saida.append(f"vídeo {w}x{h}; miniaturas {lw}x{lh} (escala {esc}): coordenadas em pixels são do vídeo, "
+                     f"não da miniatura — ou use frações 0–1")
+    except Exception:  # noqa: BLE001
+        pass
     for i, tv in enumerate(tempos):
         t = _t(tv, est)
         dest = await _bg(core.extrair_quadro, arq, t, largura, tmp / f"q{i:02d}.jpg")
@@ -1121,15 +1132,19 @@ def _objeto_versao(doc: Documento):
 async def segmentar_objeto(pontos: list[list[float]] | None = None, caixa: list[float] | None = None,
                            pontos_negativos: list[list[float]] | None = None, tempo: str | float = "atual",
                            inicio: str | float | None = None, fim: str | float | None = None, modelo: str = "sam2.1-tiny",
-                           passo_quadros: int = 1) -> list | dict:
+                           passo_quadros: int = 1, confirmar: bool = False) -> list | dict:
     """IA local (SAM 2.1): encontra um objeto num quadro e o RASTREIA pelo trecho, gerando uma máscara (id 'obj1',
     'obj2'...) usada por `remover_objeto`, `fundo_objeto`, `recortar_objeto` e `destacar_objeto`.
     Antes, veja o quadro com `ver_quadros` para achar as coordenadas do objeto.
-    - pontos: [[x, y], ...] sobre o objeto, no quadro exibido em `tempo` (pixels do vídeo como exibido, ou frações
-      0–1). Um ponto no meio do objeto costuma bastar; vários ajudam em objetos com partes de cores diferentes.
+    - pontos: [[x, y], ...] sobre o objeto, no quadro exibido em `tempo`. Use FRAÇÕES 0–1 do quadro ([0.5, 0.4] =
+      meio, 40% de cima para baixo): não dependem do tamanho da miniatura do `ver_quadros`. Pixels do vídeo (resolução
+      real, informada pelo `ver_quadros`) também valem. Um ponto no meio do objeto costuma bastar; vários ajudam em
+      objetos com partes de cores diferentes.
     - caixa: [x, y, largura, altura] em volta do objeto (mais seguro para pessoas/objetos grandes).
     - pontos_negativos: pontos que NÃO são do objeto (para separar de coisas encostadas).
-    - inicio/fim: trecho a rastrear (padrão: o vídeo todo). Rastreia para a frente e para trás a partir de `tempo`.
+    - inicio/fim: trecho a rastrear (`tempo` tem de estar dentro dele). Sem eles = o vídeo todo, que acima de 300
+      quadros (~10 s) dá erro com a estimativa de tempo, a menos que confirmar=True. Rastreia para a frente e para
+      trás a partir de `tempo`.
     - passo_quadros: k>1 roda a IA a cada k quadros (k vezes mais rápido; para objetos lentos).
     Custo: ~2–4 s por quadro em CPU (3 s de vídeo a 30 fps ≈ 3–6 min) → roda como tarefa em segundo plano
     (acompanhe com `tarefas`). Na primeira vez baixa o modelo (~156 MB). Devolve quadros de conferência com o
@@ -1141,7 +1156,7 @@ async def segmentar_objeto(pontos: list[list[float]] | None = None, caixa: list[
     a = _t(inicio, est) if inicio is not None else None
     b = _t(fim, est) if fim is not None else None
     return await _tarefa("segmentar", "segmentando objeto", ob.segmentar, doc, t, pontos, pontos_negativos,
-                         caixa, inicio=a, fim=b, modelo=modelo, passo_quadros=passo_quadros)
+                         caixa, inicio=a, fim=b, modelo=modelo, passo_quadros=passo_quadros, confirmar=confirmar)
 
 
 @ferramenta
@@ -1149,7 +1164,8 @@ async def ajustar_mascara(tempo: str | float = "atual", pontos: list[list[float]
                           pontos_negativos: list[list[float]] | None = None, caixa: list[float] | None = None,
                           mascara: str | None = None) -> list | dict:
     """Corrige uma máscara: refaz a segmentação com os prompts originais MAIS os novos no quadro em `tempo`
-    (pontos = partes do objeto que faltaram; pontos_negativos = o que entrou e não devia; caixa = nova caixa).
+    (pontos = partes do objeto que faltaram; pontos_negativos = o que entrou e não devia; caixa = nova caixa;
+    coordenadas de preferência em frações 0–1). `tempo` tem de estar dentro do trecho da máscara.
     Cria uma máscara nova (a anterior continua valendo). mascara: 'obj1'... (padrão: a mais recente)."""
     doc, est = _doc()
     ob = _objetos()
@@ -1173,7 +1189,8 @@ async def destacar_objeto(mascara: str | None = None, cor: str = "rosa", opacida
 async def remover_objeto(mascara: str | None = None, metodo: str = "auto", margem: int | None = None) -> list | dict:
     """Remove o objeto da máscara (de `segmentar_objeto`) e reconstrói o fundo; cria uma versão.
     metodo: 'auto' (mede o movimento da câmera e escolhe), 'fundo' (câmera parada: usa o fundo que aparece em
-    outros quadros + LaMa uma vez no que nunca aparece; estável e rápido), 'lama' (IA em cada quadro, ~7 s/quadro;
+    outros quadros + LaMa uma vez no que nunca aparece; estável e rápido), 'lama' (IA em cada quadro, ~5,5 s/quadro
+    + ~10–30 s para carregar o modelo;
     para câmera em movimento), 'rapido' (sem IA: as cores em volta escorrem para dentro; objetos pequenos/fundo
     liso). margem: px a mais em volta da máscara (padrão 1% do lado menor). Para deixar o objeto transparente
     em vez de reconstruir, use `recortar_objeto(inverter=True)`."""

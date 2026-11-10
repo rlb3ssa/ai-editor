@@ -204,15 +204,50 @@ class Documento:
         vs = self.versoes()
         return self.pasta / vs[-1]["arquivo"] if vs else self.original
 
+    # -- trava de tarefa (objetos.py grava versões em segundo plano; ver objetos._gravando_versao)
+    @staticmethod
+    def _ler_trava(trava: Path) -> dict | None:
+        """Dados da trava `.versoes/.trava` se o dono (pid/thread) está vivo; None se não existe ou está morta."""
+        try:
+            d = json.loads(trava.read_text())
+            pid, thread = int(d["pid"]), int(d.get("thread") or 0)
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+        if pid == os.getpid():
+            import threading
+            return d if any(t.ident == thread for t in threading.enumerate()) else None
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return None
+        except PermissionError:
+            pass
+        return d
+
+    def _conferir_trava(self) -> None:
+        """Erro se uma tarefa (outra thread/processo) está gravando uma versão deste documento."""
+        d = self._ler_trava(self.pasta / ".trava")
+        if d is None:
+            return
+        import threading
+        if int(d["pid"]) == os.getpid() and int(d.get("thread") or 0) == threading.get_ident():
+            return  # a própria tarefa
+        raise RuntimeError(f"tarefa {d.get('tarefa')} está gravando uma versão ({d.get('descricao')}); "
+                           f"espere terminar (`tarefas`) ou cancele")
+
     def proxima_saida(self, ext: str | None = None) -> Path:
+        self._conferir_trava()
         self.pasta.mkdir(exist_ok=True)
         n = len(self._ler()["versoes"]) + 1
+        while any(self.pasta.glob(f"v{n:03d}.*")):  # nome reservado por uma tarefa (ou sobra): pula
+            n += 1
         ext = ext or self.atual().suffix
         if not ext.startswith("."):
             ext = "." + ext
         return self.pasta / f"v{n:03d}{ext}"
 
     def registrar(self, saida: Path, descricao: str, comandos: list[list[str]]) -> dict:
+        self._conferir_trava()
         h = self._ler()
         h["versoes"] = [v for v in h["versoes"] if (self.pasta / v["arquivo"]).exists()]
         v = {"n": len(h["versoes"]) + 1, "arquivo": saida.name, "descricao": descricao,
@@ -223,6 +258,7 @@ class Documento:
         return v
 
     def desfazer(self) -> dict | None:
+        self._conferir_trava()
         h = self._ler()
         if not h["versoes"]:
             return None
@@ -234,6 +270,7 @@ class Documento:
         return v
 
     def descartar(self) -> int:
+        self._conferir_trava()
         n = len(self.versoes())
         shutil.rmtree(self.pasta, ignore_errors=True)
         return n
@@ -241,6 +278,7 @@ class Documento:
     def salvar(self, lixeira: bool = True) -> Path:
         """A última versão substitui o original; original e versões são removidos.
         Por segurança o original vai para a Lixeira (lixeira=False apaga de vez)."""
+        self._conferir_trava()
         vs = self.versoes()
         if not vs:
             raise ValueError("não há versões para salvar")
