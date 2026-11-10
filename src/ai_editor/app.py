@@ -31,7 +31,7 @@ from . import info as _info
 from .core import CACHE_DIR, DEV, FONTE_DIR, NOME, RUNTIME_DIR, SOCKET_PATH, TITULO, Documento, fmt_tempo, parse_tempo
 from .ondas import PICOS_POR_SEG, picos
 
-CAB = 180  # largura do cabeçalho à esquerda das faixas
+CAB = 196  # largura do cabeçalho à esquerda das faixas
 COR_FUNDO = QColor("#15171c")
 COR_TRILHA = QColor("#1f232b")
 COR_ONDA = QColor("#4fa3ff")
@@ -313,26 +313,40 @@ class LinhaFaixa(QWidget):
         lay.setSpacing(0)
         cab = QWidget()
         cab.setFixedWidth(CAB)
-        cl = QVBoxLayout(cab)
-        cl.setContentsMargins(6, 3, 6, 3)
+        # [ A1 ] | [ Codec/Channels ]
+        #        | [ mudo solo volume ]
+        hl = QHBoxLayout(cab)
+        hl.setContentsMargins(0, 3, 6, 3)
+        hl.setSpacing(0)
+        nome = QLabel(f"A{idx + 1}")
+        nome.setObjectName("nome_faixa")
+        nome.setAlignment(Qt.AlignCenter)
+        nome.setFixedWidth(36)
+        nome.setToolTip(info.get("title") or f"Faixa de áudio {idx + 1}")
+        hl.addWidget(nome)
+        divisor = QFrame()
+        divisor.setObjectName("divisor_faixa")
+        divisor.setFixedWidth(1)
+        hl.addWidget(divisor)
+        hl.addSpacing(6)
+        cl = QVBoxLayout()
+        cl.setContentsMargins(0, 0, 0, 0)
         cl.setSpacing(2)
+        hl.addLayout(cl, 1)
         # linha 1: detalhes centralizados ("Codec: aac    Channels: 2")
         campos = [("Codec", info.get("codec")), ("Channels", info.get("demux-channel-count")),
                   ("Language", info.get("lang"))]
-        det = "&nbsp;&nbsp;&nbsp;&nbsp;".join(
+        det = "&nbsp;&nbsp;&nbsp;".join(
             f"<span style='color:#6e7681'>{k}:</span> <span style='color:#c9d1d9'>{v}</span>"
             for k, v in campos if v not in (None, ""))
         rot = QLabel(det)
+        rot.setObjectName("detalhe_faixa")
         rot.setAlignment(Qt.AlignCenter)
         if info.get("title"):
             rot.setToolTip(info["title"])
         cl.addWidget(rot)
-        # linha 2: nome da faixa à esquerda do mudo, solo e volume
+        # linha 2: mudo, solo e volume
         lin = QHBoxLayout()
-        nome = QLabel(f"A{idx + 1}")
-        nome.setObjectName("nome_faixa")
-        nome.setToolTip(info.get("title") or f"Faixa de áudio {idx + 1}")
-        lin.addWidget(nome)
         self.b_mudo = self._botao("volume-off", "Mudo", "mudo")
         self.b_solo = self._botao("headphones", "Solo (ouvir só esta faixa)", "solo")
         self.vol = QSlider(Qt.Horizontal)
@@ -1359,7 +1373,9 @@ QToolButton#salvar:hover { background: #3a80d6; }
 QToolButton#salvar:disabled { background: #262b34; color: #4a4f5a; }
 QWidget#canto { background: #0d1117; border-right: 1px solid #21262d; }
 QLabel#tempo { color: #e6edf3; }
-QLabel#nome_faixa { color: #e6edf3; font-weight: 700; padding: 0 4px 0 2px; }
+QLabel#nome_faixa { color: #e6edf3; font-size: 16px; font-weight: 700; }
+QLabel#detalhe_faixa { font-size: 11px; }
+QFrame#divisor_faixa { background: #30363d; margin: 4px 0; }
 QLineEdit#ir { background: #15171c; border: 1px solid #4fa3ff; border-radius: 4px; padding: 1px 2px; color: #e6edf3; }
 QLabel#sutil { color: #6e7681; }
 QLabel#quadro { color: #e6edf3; background: rgba(13, 17, 23, 170); border-radius: 4px; padding: 3px 7px; }
