@@ -242,13 +242,15 @@ de 50 ms do `astats` (`niveis_audio`, p10 = piso; fala = p80 das janelas acima d
   áudio = vídeo (20,010/20,000).
 - [x] Extrair só o áudio: coberto por `exportar` (predefinições `mp3`/`m4a`/`opus`/`ogg`/`wav`/`flac`) e por
   `faixa_audio(acao='extrair')` — sem ferramenta nova.
-- [ ] DeepFilterNet (redução de ruído com IA) — **pendente, não baixado**. Análise: DeepFilterNet 3 (MIT/Apache-2.0,
-  ok com GPL-3.0). O caminho leve é o executável `deep-filter` (Rust/libDF, ~10–20 MB com o modelo, binário x86_64 nas
-  releases do GitHub) ou os 3 modelos ONNX (~8 MB) no ONNX Runtime da Fase 7; **não** usar o pacote Python (PyTorch,
-  ~700 MB). Roda mais rápido que o tempo real em 1 núcleo (RTF ~0,05), memória < 200 MB: viável na máquina alvo.
-  Trabalha em 48 kHz: ffmpeg extrai a faixa em WAV 48 kHz → `deep-filter` → remonta como versão (mesmo
-  `_editar_audio`). Recomendação: entrar como `metodo='deepfilter'` em `reduzir_ruido`, baixado sob demanda
-  (com confirmação e tamanho) para `~/.local/share/ai-editor/bin`.
+- [x] DeepFilterNet (redução de ruído com IA): `reduzir_ruido(metodo='deepfilternet')` (`deepfilter.py`). Executável
+  oficial `deep-filter` 0.5.6 x86_64 musl (estático, modelo DeepFilterNet3 embutido, MIT OR Apache-2.0), 36 MB,
+  baixado no 1º uso com SHA-256 fixo para `~/.local/share/ai-editor/bin` (funciona igual no AppImage). Sem PyTorch e
+  sem onnxruntime. Áudio extraído em 48 kHz float32, processado em blocos de 5 min com 2 s de folga antes / 1 s
+  depois (memória limitada), `-D` (atraso exato da STFT + lookahead) e miolo de cada bloco recortado por amostra;
+  trecho (inicio/fim) trocado por concat (fora dele, o original). Intensidade = limite de atenuação (leve 12 dB,
+  media 24 dB, forte sem limite). Encaixe verificado com um `deep-filter` falso (identidade): mesmo desvio que os
+  outros métodos. **Pendente:** teste com o binário real (qualidade e velocidade) — a execução do binário baixado
+  não foi autorizada na sessão automática.
 - [ ] Separar voz da música — **pendente, não baixado**. Demucs v4 (`htdemucs`, código e pesos MIT): exige PyTorch
   (~700 MB–1 GB instalado) + modelo ~80 MB (`htdemucs_ft` ~320 MB); em CPU de notebook ~0,5–1× o tempo real e
   2–4 GB de RAM em trechos longos (precisa `--segment`): pesado demais para o caminho principal e arriscado com
@@ -646,7 +648,7 @@ Destino: `~/.local/share/ai-editor/bin` e `~/.local/share/ai-editor/modelos`.
 | SAM 2.1 tiny (`onnx-community/sam2.1-hiera-tiny-ONNX` @ `814a066`, fp32; `small` opcional @ `a7df49d`, 184 MB) | segmentar/rastrear objetos (Fase 7) | Apache-2.0 (pesos da Meta; o repo ONNX não declara licença própria — conversão herda a Apache-2.0) | 156 MB |
 | LaMa (`opencv/inpainting_lama` @ `aee6d22`, `inpainting_lama_2025jan.onnx`; derivado do `Carve/LaMa-ONNX`) | preencher fundo removido (Fase 7) | Apache-2.0 (LICENSE no repo) | 93 MB |
 | whisper.cpp v1.9.5 (`whisper-cli`, compilado do fonte: tarball SHA-256 `ff1a9053…dc1720`) + modelos ggml tiny/base/small (HF `ggerganov/whisper.cpp` @ `5359861c`, SHA-256 fixados em `fala.MODELOS`) | legendas/transcrição (Fase 6) | MIT (código e modelos) | 3,2 MB + 78/148/488 MB (q5_1: 60/190 MB) |
-| DeepFilterNet | redução de ruído de alta qualidade | MIT/Apache-2.0 | ~10 MB |
+| DeepFilterNet 0.5.6 (`deep-filter` x86_64 musl, release do GitHub, SHA-256 `70775e25…72ef7da`, modelo DeepFilterNet3 embutido) | redução de ruído com IA (`metodo='deepfilternet'`) | MIT OR Apache-2.0 | 35 MB (sob demanda) |
 | Demucs (opcional) | separar voz e música | MIT | ~300 MB |
 
 ### 5.3 Eliminados

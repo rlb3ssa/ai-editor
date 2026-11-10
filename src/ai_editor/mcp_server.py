@@ -586,10 +586,15 @@ async def reduzir_ruido(metodo: str = "afftdn", intensidade: str | float = "medi
     metodo='anlmdn': alternativa mais suave (médias não locais), ~10× mais lenta, reduz menos.
     metodo='rnnoise': rede neural para voz (arnndn); só funciona se houver um modelo .rnnn em
       ~/.local/share/ai-editor/modelos/rnnoise/ (senão dá erro explicando).
+    metodo='deepfilternet': rede neural DeepFilterNet 3, a melhor para VOZ com ruído que muda (trânsito, vento,
+      teclado, gente ao fundo, eco de sala); roda local na CPU, ~10–30× mais rápida que o tempo real.
+      Baixa ~36 MB no primeiro uso (avise o usuário). Não use em música (pode tratar instrumentos como ruído).
+      intensidade aqui = limite de atenuação: 'leve' 12 dB, 'media' 24 dB, 'forte' sem limite, ou dB.
     intensidade: 'leve' (10 dB), 'media' (20 dB, padrão), 'forte' (32 dB) ou dB de redução (3–60).
     faixa: 1 = A1. inicio/fim: só nesse trecho. piso_ruido_db: força o nível do ruído (dBFS) se a medição errar.
     A resposta traz `detalhes` (ruído medido, de onde veio a amostra, parâmetros).
     Exemplos: "tira o chiado" → padrão; "ainda tem ruído" → intensidade='forte';
+    "limpa a voz, tem barulho de rua" → metodo='deepfilternet';
     "limpa o ruído só do m1 ao m2" → inicio='m1', fim='m2'."""
     doc, est = _doc()
     v = await _bg(core.reduzir_ruido, doc, metodo=metodo, intensidade=intensidade, faixa=faixa, inicio=inicio,

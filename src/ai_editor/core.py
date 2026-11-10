@@ -2982,13 +2982,19 @@ def reduzir_ruido(doc: Documento, metodo: str = "afftdn", intensidade="media", f
     metodo 'anlmdn' (médias não locais): mais suave, sem perfil; ~10× mais lento.
     metodo 'rnnoise' (arnndn, rede neural para voz): precisa de um modelo .rnnn em
       ~/.local/share/ai-editor/modelos/rnnoise/ (não é baixado automaticamente).
+    metodo 'deepfilternet' (rede neural DeepFilterNet 3, melhor para voz com ruído variado: trânsito,
+      teclado, eco, vento): baixado no primeiro uso (~36 MB, `deepfilter.py`); ~10–30× mais rápido que o
+      tempo real na CPU. A intensidade vira o limite de atenuação (leve 12 dB, media 24 dB, forte = sem limite).
     intensidade: 'leve' (10 dB), 'media' (20 dB), 'forte' (32 dB) ou dB de redução (3–60).
     inicio/fim: aplica só nesse trecho (o resto fica igual). piso_ruido_db: força o nível do ruído (dBFS RMS).
     Sincronia: o atraso do filtro (afftdn 25 ms, anlmdn 8 ms; `latencia_filtro`) é compensado (silêncio desse
     tamanho no fim, corte do mesmo tanto no começo) e o início da faixa (start_time) é mantido."""
-    metodo = (metodo or "afftdn").lower()
-    if metodo not in ("afftdn", "anlmdn", "rnnoise"):
-        raise ValueError("metodo: 'afftdn' (padrão), 'anlmdn' ou 'rnnoise'")
+    metodo = (metodo or "afftdn").lower().replace("-", "").replace("_", "")
+    metodo = {"dfn": "deepfilternet", "deepfilter": "deepfilternet", "ia": "deepfilternet"}.get(metodo, metodo)
+    if metodo not in ("afftdn", "anlmdn", "rnnoise", "deepfilternet"):
+        raise ValueError("metodo: 'afftdn' (padrão), 'anlmdn', 'rnnoise' ou 'deepfilternet'")
+    if metodo == "deepfilternet":
+        return _reduzir_ruido_dfn(doc, intensidade, faixa, inicio, fim, estado, progresso)
     nr = _intensidade_db(intensidade)
     entrada = doc.atual()
     info = _info_audio(entrada)
@@ -3072,6 +3078,88 @@ def reduzir_ruido(doc: Documento, metodo: str = "afftdn", intensidade="media", f
     if avisos:
         extra["avisos"] = avisos
     return _editar_audio(doc, [cadeia], {k: "ar"}, desc, progresso, extra_in, info=info, extra=extra)
+
+
+def _reduzir_ruido_dfn(doc: Documento, intensidade, faixa: int, inicio, fim, estado: dict | None,
+                       progresso=None) -> dict:
+    """reduzir_ruido com o DeepFilterNet (ver deepfilter.py). O trecho processado é trocado amostra por
+    amostra; fora dele a faixa é copiada do original (concat sem refazer nada)."""
+    from . import deepfilter
+    if isinstance(intensidade, str) and intensidade.strip().lower() in ("leve", "media", "média", "medio", "forte"):
+        aten = {"leve": 12.0, "forte": 100.0}.get(intensidade.strip().lower(), 24.0)
+    else:
+        aten = _intensidade_db(intensidade)
+    entrada = doc.atual()
+    info = _info_audio(entrada)
+    k = _faixa_valida(faixa, len(info["auds"]))
+    est = dict(estado or {})
+    est.setdefault("duracao", info["dur"])
+    a, b, _ = _janela_tempo(inicio, fim, est, info["dur"])
+    s = info["auds"][k]
+    sr = int(s.get("sample_rate") or 48000)
+    canais = int(s.get("channels") or 2)
+    st, fim_faixa = _extensao_faixa(info, s)
+    # tempos relativos ao começo da faixa (é assim que o deep-filter e o asetpts=PTS-STARTPTS os veem)
+    ra = max(0.0, (a - st)) if a is not None else 0.0
+    rb = max(ra, min(b, fim_faixa) - st) if a is not None else None
+    if rb is not None and rb - ra < 0.05:
+        raise ValueError("o trecho pedido não tem áudio nessa faixa")
+    baixou = binarios.localizar("deep-filter") is None
+    p_ini = 0.02 if baixou else 0.0
+    if baixou:
+        if progresso:
+            progresso(0.0)
+        deepfilter.executavel(progresso=(lambda f: progresso(0.02 * f)) if progresso else None)
+    doc._conferir_trava()
+    doc.pasta.mkdir(parents=True, exist_ok=True)
+    tmp = Path(tempfile.mkdtemp(prefix=".deepfilter-", dir=doc.pasta))
+    try:
+        raw, n = deepfilter.processar(entrada, k, ra, rb, canais, aten, tmp,
+                                      progresso=(lambda f: progresso(p_ini + (0.85 - p_ini) * f))
+                                      if progresso else None)
+        extra_in = ["-f", "s16le", "-ar", str(deepfilter.SR), "-ac", str(canais), "-i", str(raw)]
+        # o PCM cru entra com o layout padrão do ffmpeg para N canais; o mesmo channelmap do original o põe
+        # no layout padrão da tabela (_LAYOUT_PADRAO), senão o concat recusa ("Channel layout change")
+        lay = _filtro_layout({"channels": canais, "channel_layout": ""})
+        meio = f"[1:a]{lay}aresample={sr},asetpts=PTS-STARTPTS"
+        orig = f"[0:a:{k}]{_filtro_layout(s)}asetpts=PTS-STARTPTS"
+        if rb is None:
+            cadeia = f"{meio},asetpts=PTS-STARTPTS+{st:.6f}/TB[ar]"
+            grafo = [cadeia]
+        else:
+            ia, ib = round(ra * sr), round(rb * sr)
+            partes, rot = [], []
+            tem_antes, tem_depois = ia > 0, rb < fim_faixa - st - 0.001
+            n_orig = int(tem_antes) + int(tem_depois)
+            if n_orig:
+                partes.append(f"{orig}" + (f",asplit={n_orig}" if n_orig > 1 else "")
+                              + "".join(f"[o{i}]" for i in range(n_orig)))
+            i = 0
+            if tem_antes:
+                partes.append(f"[o{i}]atrim=end_sample={ia}[antes]")
+                rot.append("[antes]")
+                i += 1
+            partes.append(f"{meio},apad,atrim=end_sample={ib - ia}[meio]")
+            rot.append("[meio]")
+            if tem_depois:
+                partes.append(f"[o{i}]atrim=start_sample={ib},asetpts=PTS-STARTPTS[depois]")
+                rot.append("[depois]")
+            partes.append(f"{''.join(rot)}concat=n={len(rot)}:v=0:a=1,asetpts=PTS-STARTPTS+{st:.6f}/TB[ar]")
+            grafo = partes
+        desc = (f"reduziu ruído A{k + 1} (DeepFilterNet 3, "
+                + ("sem limite de atenuação" if aten >= 100 else f"atenuação até {aten:g} dB") + ")"
+                + _desc_janela(a, b))
+        detalhes = {"metodo": "deepfilternet", "faixa": f"A{k + 1}", "atenuacao_max_db": aten,
+                    "versao": deepfilter.VERSAO, "amostras_processadas_48k": n,
+                    "latencia_compensada_ms": "exata (-D do deep-filter)"}
+        extra = {"detalhes": detalhes}
+        if baixou:
+            extra["avisos"] = [f"DeepFilterNet {deepfilter.VERSAO} baixado agora (~36 MB, SHA-256 conferido) "
+                               f"para {binarios.BIN_SOB_DEMANDA}"]
+        prog2 = (lambda f: progresso(0.85 + 0.15 * f)) if progresso else None
+        return _editar_audio(doc, grafo, {k: "ar"}, desc, prog2, extra_in, info=info, extra=extra)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 # ---- silêncios

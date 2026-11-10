@@ -77,6 +77,9 @@ REGISTRO: dict[str, Ferramenta] = {f.nome: f for f in [
                obrigatoria=False, sob_demanda=True, versao_cmd=["--version"],
                versao_rx=r"version:\s*([\w.\-]+)",
                dica="compile o whisper.cpp fixado (1–2 min, sem sudo): python -m ai_editor.fala --instalar-whisper"),
+    Ferramenta("deep-filter", "redução de ruído com rede neural (DeepFilterNet 3)", "MIT/Apache-2.0",
+               obrigatoria=False, sob_demanda=True, versao_cmd=["--version"],
+               dica="baixado sozinho no primeiro uso (~36 MB) ou: python -m ai_editor.deepfilter --instalar"),
 ]}
 
 # Recursos do ffmpeg usados (ou planejados) pelo app: (tipo, nome, obrigatório?, para quê)
