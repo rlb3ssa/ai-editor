@@ -1,0 +1,12 @@
+#!/bin/sh
+# Lançador do servidor MCP do AI Editor para o Claude Desktop (bundle .mcpb).
+# O bundle não leva o programa: usa o AppImage instalado com `AI_Editor-*.AppImage --instalar`.
+for exe in "$AI_EDITOR_APPIMAGE" "$HOME/.local/bin/ai-editor" "$(command -v ai-editor 2>/dev/null)" \
+           $(ls -t "$HOME"/Applications/AI_Editor-*.AppImage "$HOME"/Downloads/AI_Editor-*.AppImage 2>/dev/null); do
+    if [ -n "$exe" ] && [ -x "$exe" ]; then
+        exec "$exe" --mcp
+    fi
+done
+echo "AI Editor não encontrado. Baixe o AppImage em https://github.com/rlb3ssa/ai-editor/releases e rode:" >&2
+echo "  chmod +x AI_Editor-*.AppImage && ./AI_Editor-*.AppImage --instalar" >&2
+exit 1

@@ -1,0 +1,75 @@
+# CI: compila tudo, roda os testes que existirem e testa o --instalar/--desinstalar num HOME falso.
+name: CI
+
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+    branches: [dev, main]
+
+jobs:
+  checagens:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      UV_PYTHON: /usr/bin/python3.12
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dependências do sistema
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libmpv2 ffmpeg mediainfo libimage-exiftool-perl
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: uv sync
+        run: uv sync --frozen
+
+      - name: Compila (py_compile)
+        run: uv run --frozen python -m compileall -q src packaging
+
+      - name: Sintaxe dos scripts
+        run: |
+          bash -n packaging/build_appimage.sh
+          bash -n deploy.sh
+          sh -n packaging/AppRun
+          sh -n packaging/mcpb/server/ai-editor-mcp
+
+      - name: Testes
+        run: |
+          if [ -d tests ]; then
+            if uv run --frozen python -c 'import pytest' 2>/dev/null; then uv run --frozen pytest -q tests
+            else uv run --frozen python -m unittest discover -s tests -v; fi
+          else
+            echo "sem pasta tests/"
+          fi
+
+      - name: Linha de comando e diagnóstico
+        run: |
+          uv run --frozen ai-editor --versao
+          uv run --frozen ai-editor --diagnostico || true
+
+      - name: --instalar / --desinstalar num HOME falso
+        run: |
+          h="$RUNNER_TEMP/home"; mkdir -p "$h/.config/Claude"
+          printf '[Default Applications]\nvideo/mp4=vlc.desktop\n' > "$h/.config/mimeapps.list"
+          echo '{"mcpServers":{"outro":{"command":"x"}}}' > "$h/.claude.json"
+          cp "$h/.config/mimeapps.list" "$RUNNER_TEMP/mime.orig"; cp "$h/.claude.json" "$RUNNER_TEMP/claude.orig"
+          ai="$PWD/.venv/bin/ai-editor"
+          rodar() { env -i HOME="$h" PATH=/usr/bin:/bin AI_EDITOR_DEV=0 "$ai" "$@"; }
+          rodar --instalar
+          rodar --instalar
+          grep -q '^video/mp4=ai-editor.desktop' "$h/.config/mimeapps.list"
+          python3 -c "import json,sys; d=json.load(open(sys.argv[1])); assert d['mcpServers']['ai-editor']['args']==['--mcp']" "$h/.claude.json"
+          test -f "$h/.local/share/applications/ai-editor.desktop"
+          rodar --desinstalar
+          diff "$RUNNER_TEMP/mime.orig" "$h/.config/mimeapps.list"
+          python3 -c "import json,sys; assert json.load(open(sys.argv[1]))==json.load(open(sys.argv[2]))" "$RUNNER_TEMP/claude.orig" "$h/.claude.json"
+          test ! -e "$h/.local/share/applications/ai-editor.desktop"
+
+      - name: Servidor MCP responde ao initialize
+        run: |
+          printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"0"}}}' \
+            | AI_EDITOR_DEV=0 timeout 60 uv run --frozen ai-editor --mcp > init.json
+          grep -q '"serverInfo"' init.json

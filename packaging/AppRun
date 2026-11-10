@@ -1,0 +1,5 @@
+#!/bin/sh
+# Ponto de entrada do AppImage: o runtime define $APPDIR (raiz montada) e $APPIMAGE (o arquivo .AppImage).
+AQUI="$(dirname "$(readlink -f "$0")")"
+export APPDIR="${APPDIR:-$AQUI}"
+exec "$APPDIR/usr/bin/ai-editor" "$@"

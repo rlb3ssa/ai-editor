@@ -19,3 +19,5 @@ squashfs-root/
 
 # Modelos de IA baixados sob demanda
 modelos/
+*.zsync
+*.mcpb

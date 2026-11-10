@@ -1,0 +1,79 @@
+# Release: a cada tag vX.Y.Z, gera o AppImage (+ .zsync), o bundle .mcpb e publica na Release do GitHub.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  appimage:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      UV_PYTHON: /usr/bin/python3.12
+      AI_EDITOR_BUILD_DIR: ${{ github.workspace }}/../ai-editor-build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dependências do sistema
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            python3.12-dev libmpv2 mediainfo perl patchelf zsync desktop-file-utils file curl xz-utils
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Confere a versão da tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          versao="$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)"
+          if [ "v$versao" != "${GITHUB_REF_NAME}" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} não bate com a versão do pyproject.toml ($versao)"; exit 1
+          fi
+
+      - name: Build do AppImage
+        run: packaging/build_appimage.sh
+
+      - name: Testes do AppImage
+        run: |
+          app="$(ls dist/AI_Editor-*-x86_64.AppImage)"
+          export APPIMAGE_EXTRACT_AND_RUN=1
+          "$app" --versao
+          "$app" --diagnostico | tee diag.txt
+          for f in ffmpeg ffprobe libmpv mediainfo exiftool c2patool; do
+            grep -E "✔ $f .*\[pacote\]" diag.txt >/dev/null || { echo "::error::$f não veio do pacote"; exit 1; }
+          done
+          printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci","version":"0"}}}' \
+            | timeout 60 "$app" --mcp > init.json
+          grep -q '"serverInfo"' init.json
+
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum AI_Editor-*.AppImage AI_Editor-*.AppImage.zsync ai-editor-*.mcpb COMPONENTES.txt LICENCAS_TERCEIROS.md > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Publica na Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: AI Editor ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            dist/AI_Editor-*-x86_64.AppImage
+            dist/AI_Editor-*-x86_64.AppImage.zsync
+            dist/ai-editor-*.mcpb
+            dist/COMPONENTES.txt
+            dist/LICENCAS_TERCEIROS.md
+            dist/SHA256SUMS.txt
+
+      - name: Artefatos (execução manual)
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-editor-appimage
+          path: dist/

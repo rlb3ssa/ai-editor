@@ -21,6 +21,42 @@ Quando você usa a IA, ela recebe apenas o que as ferramentas devolvem (textos, 
 ela "ver" o vídeo, alguns quadros em imagem). Recursos de IA local (legendas, recorte de objetos) baixam modelos
 uma única vez e depois funcionam offline.
 
+## Instalação (AppImage)
+Um único arquivo com tudo embutido (Python, Qt, libmpv, ffmpeg, MediaInfo, ExifTool, c2patool). Precisa de um Linux
+com glibc 2.39 ou mais nova (Ubuntu 24.04, Fedora 40, Debian 13...) e do `perl` do sistema (para o ExifTool).
+
+1. Baixe `AI_Editor-X.Y.Z-x86_64.AppImage` na página de [Releases](https://github.com/rlb3ssa/ai-editor/releases)
+   (confira com o `SHA256SUMS.txt`) e guarde num lugar fixo, por exemplo `~/Applications/`.
+2. Dê permissão e instale a integração com o sistema e com o Claude:
+   ```bash
+   chmod +x AI_Editor-*-x86_64.AppImage
+   ./AI_Editor-*-x86_64.AppImage --instalar
+   ```
+   O `--instalar` cria o atalho `~/.local/bin/ai-editor`, o item no menu de aplicativos, associa os tipos de
+   vídeo/áudio ao AI Editor (`--sem-mime` para não associar) e registra o servidor MCP no **Claude Code**
+   (`claude mcp add --scope user ai-editor`) e no **Claude Desktop**, se estiverem instalados (`--sem-claude` para pular).
+   Tudo fica no seu diretório pessoal, sem `sudo`; os arquivos de configuração alterados ganham uma cópia `*.ai-editor.bak`.
+3. No Claude Code, rode `/mcp` (ou abra uma sessão nova); no Claude Desktop, reinicie o aplicativo.
+
+Outros comandos:
+```bash
+ai-editor video.mp4            # abre a janela
+ai-editor --diagnostico        # ferramentas encontradas (no AppImage, todas vêm do pacote)
+ai-editor --desinstalar        # desfaz o --instalar (restaura associações e registros anteriores)
+ai-editor --versao
+```
+**Atualizar:** o AppImage traz a informação de atualização (zsync); use o
+[AppImageUpdate](https://github.com/AppImageCommunity/AppImageUpdate) ou simplesmente troque o arquivo.
+**Claude Desktop:** além do `--instalar`, há o bundle `ai-editor-X.Y.Z.mcpb` na Release (abre o AppImage instalado).
+Licenças e código-fonte dos componentes embutidos: `LICENCAS_TERCEIROS.md` e `COMPONENTES.txt` na Release.
+
+### Gerar o AppImage
+```bash
+packaging/build_appimage.sh     # → dist/ (AppImage, .zsync, .mcpb); downloads em ~/.cache/ai-editor-build
+```
+Requer Ubuntu 24.04 com `uv`, `libmpv2`, `mediainfo`, `perl` e `patchelf` (ou `uvx`). Releases: `./deploy.sh X.Y.Z`
+cria a tag (`--push` envia) e o GitHub Actions publica.
+
 ## Requisitos (rodando do código-fonte)
 - Linux (testado no Ubuntu 24.04, X11; Wayland em teste).
 - `sudo apt install ffmpeg libmpv2 mediainfo libimage-exiftool-perl`
@@ -33,7 +69,7 @@ uv run ai-editor --diagnostico      # mostra as ferramentas encontradas
 claude mcp add ai-editor -- "$(pwd)/.venv/bin/ai-editor-mcp"   # conecta ao Claude Code
 ```
 
-Um AppImage com tudo embutido (sem precisar instalar nada) está no roadmap.
+No código-fonte, `uv run ai-editor --instalar` registra a versão de desenvolvimento (`ai-editor-dev`).
 
 ## Licença
 **GPL-3.0-or-later** — veja [`LICENSE`](LICENSE).

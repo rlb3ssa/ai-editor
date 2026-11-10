@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Ícone do AI Editor. GPL-3.0-or-later, como o resto do projeto. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <defs>
+    <linearGradient id="fundo" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3b2f8f"/>
+      <stop offset="1" stop-color="#0f6c8c"/>
+    </linearGradient>
+    <linearGradient id="onda" gradientUnits="userSpaceOnUse" x1="56" y1="0" x2="196" y2="0">
+      <stop offset="0" stop-color="#ffd166"/>
+      <stop offset="1" stop-color="#5ee6d0"/>
+    </linearGradient>
+  </defs>
+  <rect x="12" y="12" width="232" height="232" rx="52" fill="url(#fundo)"/>
+  <!-- quadro de vídeo -->
+  <rect x="44" y="52" width="168" height="104" rx="16" fill="#ffffff" fill-opacity="0.12" stroke="#ffffff" stroke-opacity="0.55" stroke-width="6"/>
+  <path d="M112 78 L152 104 L112 130 Z" fill="#ffffff"/>
+  <!-- onda de áudio -->
+  <g stroke="url(#onda)" stroke-width="9" stroke-linecap="round">
+    <line x1="56" y1="196" x2="56" y2="204"/>
+    <line x1="76" y1="186" x2="76" y2="214"/>
+    <line x1="96" y1="178" x2="96" y2="222"/>
+    <line x1="116" y1="190" x2="116" y2="210"/>
+    <line x1="136" y1="182" x2="136" y2="218"/>
+    <line x1="156" y1="192" x2="156" y2="208"/>
+    <line x1="176" y1="184" x2="176" y2="216"/>
+    <line x1="196" y1="195" x2="196" y2="205"/>
+  </g>
+  <!-- brilho de "IA" -->
+  <path d="M206 30 C208 44 212 48 226 50 C212 52 208 56 206 70 C204 56 200 52 186 50 C200 48 204 44 206 30 Z" fill="#ffd166"/>
+</svg>
