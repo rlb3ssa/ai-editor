@@ -316,14 +316,23 @@ class LinhaFaixa(QWidget):
         cl = QVBoxLayout(cab)
         cl.setContentsMargins(6, 3, 6, 3)
         cl.setSpacing(2)
-        nome = f"A{idx + 1}"
-        det = " ".join(str(x) for x in (info.get("lang"), info.get("codec"),
-                                        f"{info.get('demux-channel-count', '?')}ch") if x)
-        rot = QLabel(f"<b>{nome}</b> <span style='color:#8b949e'>{det}</span>")
+        # linha 1: detalhes centralizados ("Codec: aac    Channels: 2")
+        campos = [("Codec", info.get("codec")), ("Channels", info.get("demux-channel-count")),
+                  ("Language", info.get("lang"))]
+        det = "&nbsp;&nbsp;&nbsp;&nbsp;".join(
+            f"<span style='color:#6e7681'>{k}:</span> <span style='color:#c9d1d9'>{v}</span>"
+            for k, v in campos if v not in (None, ""))
+        rot = QLabel(det)
+        rot.setAlignment(Qt.AlignCenter)
         if info.get("title"):
             rot.setToolTip(info["title"])
         cl.addWidget(rot)
+        # linha 2: nome da faixa à esquerda do mudo, solo e volume
         lin = QHBoxLayout()
+        nome = QLabel(f"A{idx + 1}")
+        nome.setObjectName("nome_faixa")
+        nome.setToolTip(info.get("title") or f"Faixa de áudio {idx + 1}")
+        lin.addWidget(nome)
         self.b_mudo = self._botao("volume-off", "Mudo", "mudo")
         self.b_solo = self._botao("headphones", "Solo (ouvir só esta faixa)", "solo")
         self.vol = QSlider(Qt.Horizontal)
@@ -1350,6 +1359,7 @@ QToolButton#salvar:hover { background: #3a80d6; }
 QToolButton#salvar:disabled { background: #262b34; color: #4a4f5a; }
 QWidget#canto { background: #0d1117; border-right: 1px solid #21262d; }
 QLabel#tempo { color: #e6edf3; }
+QLabel#nome_faixa { color: #e6edf3; font-weight: 700; padding: 0 4px 0 2px; }
 QLineEdit#ir { background: #15171c; border: 1px solid #4fa3ff; border-radius: 4px; padding: 1px 2px; color: #e6edf3; }
 QLabel#sutil { color: #6e7681; }
 QLabel#quadro { color: #e6edf3; background: rgba(13, 17, 23, 170); border-radius: 4px; padding: 3px 7px; }
