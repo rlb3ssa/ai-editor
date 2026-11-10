@@ -1,10 +1,13 @@
 """Janela do AI Editor: vídeo (libmpv) + régua em ms + uma onda por faixa de áudio."""
 from __future__ import annotations
 
+import bisect
 import json
 import locale
 import os
+import subprocess
 import sys
+import threading
 from pathlib import Path
 
 # Em X11 o Qt usa EGL (e não GLX): é o que permite ao mpv decodificar por hardware (VAAPI) sem cópia.
@@ -407,6 +410,34 @@ class LinhaFaixa(QWidget):
 # ====================================================================== trabalho em segundo plano
 class _SinalOnda(QObject):
     pronto = Signal(str, int, object)
+
+
+def tempos_quadros(arquivo: str) -> list[float] | None:
+    """Instante de exibição de CADA quadro do 1º vídeo (s, na escala do time-pos do mpv, que desconta o
+    start_time do arquivo). Lê só os pacotes (sem decodificar): ~0,2 s por minuto de vídeo. Necessário porque
+    gravações de tela/celular têm taxa VARIÁVEL e "tempo × fps" não dá o número do quadro."""
+    from .core import FFPROBE
+    try:
+        r = subprocess.run([FFPROBE, "-v", "error", "-select_streams", "v:0", "-show_entries",
+                            "format=start_time:packet=pts_time", "-of", "compact=nk=0", arquivo],
+                           capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    inicio, pts = 0.0, []
+    for linha in r.stdout.splitlines():
+        if linha.startswith("packet|pts_time="):
+            v = linha.split("=", 1)[1]
+            if v not in ("N/A", ""):
+                pts.append(float(v))
+        elif linha.startswith("format|start_time="):
+            try:
+                inicio = float(linha.split("=", 1)[1])
+            except ValueError:
+                pass
+    if len(pts) < 2:  # áudio puro ou imagem
+        return None
+    pts.sort()
+    return [t - inicio for t in pts]
 
 
 class TarefaOnda(QRunnable):
@@ -859,6 +890,27 @@ class Janela(QMainWindow):
         except Exception as e:  # noqa: BLE001
             self.statusBar().showMessage(f"mpv: {prop}: {e}", 5000)
 
+    def _indexar_quadros(self, arquivo: Path):
+        self._quadros = (None, None)
+
+        def fazer():
+            t = tempos_quadros(str(arquivo))
+            if self.arquivo == arquivo:
+                self._quadros = (arquivo, t)
+        threading.Thread(target=fazer, daemon=True, name="indice-quadros").start()
+
+    def _tempos_quadros(self) -> list[float] | None:
+        arq, t = getattr(self, "_quadros", (None, None))
+        return t if arq == self.arquivo else None
+
+    def quadro_atual(self) -> int | None:
+        """Nº do quadro exibido (0 = primeiro): pela lista real de quadros; enquanto ela não fica pronta
+        (ou sem vídeo), estimado por tempo × fps."""
+        t = self._tempos_quadros()
+        if t:
+            return max(0, bisect.bisect_right(t, self.pos + 0.001) - 1)
+        return int(round(self.pos * self.fps)) if self.fps else None
+
     @property
     def fps(self) -> float:
         return float(self._get("container-fps") or self._get("estimated-vf-fps") or 0) or 0.0
@@ -882,6 +934,7 @@ class Janela(QMainWindow):
         self._start_pendente = pos > 0
         self.mpv.loadfile(str(arquivo))
         self.pos = pos
+        self._indexar_quadros(arquivo)
         self._atualizar_versao()
 
     def recarregar(self, mensagem: str | None = None):
@@ -926,8 +979,11 @@ class Janela(QMainWindow):
         elif n == -1:
             self.mpv.command("frame-back-step")
         else:
-            fps = self.fps or 30
-            self.pular(self.pos + n / fps)
+            t, q = self._tempos_quadros(), self.quadro_atual()
+            if t and q is not None:
+                self.pular(t[max(0, min(len(t) - 1, q + n))])
+            else:
+                self.pular(self.pos + n / (self.fps or 30))
 
     def marcar(self, adicionar=None, remover=None, limpar=False):
         """adicionar: tempos (s); remover: números das marcas (1 = a mais cedo); limpar: tira todas."""
@@ -1179,7 +1235,7 @@ class Janela(QMainWindow):
             self.l_tempo.setToolTip(dica)
             self.canto.setToolTip(dica)
         fps = self.fps
-        self.tela.mostrar_quadro(int(round(self.pos * fps)) if fps else None, fps)
+        self.tela.mostrar_quadro(self.quadro_atual(), fps)
         self._repintar()
 
     def _repintar(self):
@@ -1213,7 +1269,7 @@ class Janela(QMainWindow):
             "posicao": round(self.pos, 3), "posicao_fmt": fmt_tempo(self.pos),
             "duracao": round(self.visao.dur, 3), "duracao_fmt": fmt_tempo(self.visao.dur),
             "pausado": bool(self._get("pause", True)), "velocidade": self._get("speed", 1.0),
-            "fps": self.fps, "quadro": int(round(self.pos * self.fps)) if self.fps else None,
+            "fps": self.fps, "quadro": self.quadro_atual(),
             **self.info_marcas(),
             "capitulos": [{"n": i + 1, "tempo": round(c["tempo"], 3), "tempo_fmt": fmt_tempo(c["tempo"]),
                            "titulo": c["titulo"]} for i, c in enumerate(self.capitulos)],

@@ -125,7 +125,47 @@ def rodar(cmd: list[str], timeout: float | None = None) -> subprocess.CompletedP
 def ffprobe(path: Path | str) -> dict:
     r = rodar([FFPROBE, "-v", "error", "-print_format", "json", "-show_format",
                "-show_streams", "-show_chapters", str(path)])
-    return json.loads(r.stdout)
+    probe = json.loads(r.stdout)
+    _corrigir_fps_vfr(probe, path)
+    return probe
+
+
+_TAXAS_COMUNS = (23.976, 24, 25, 29.97, 30, 48, 50, 59.94, 60, 90, 100, 119.88, 120, 144, 240)
+
+
+def _corrigir_fps_vfr(probe: dict, path) -> None:
+    """WebM/MKV de gravação de tela (Clipchamp, OBS, navegador) e vídeos de taxa variável costumam vir com
+    avg_frame_rate 0/0 e r_frame_rate = escala de tempo (1000/1). Tudo que usa a taxa (cortes, grade de
+    quadros, efeitos) passaria a trabalhar a 1000 fps: 40× mais quadros, horas de encode e um arquivo
+    de 1000 fps. Aqui a taxa média real é medida pelos pacotes (sem decodificar, ~0,2 s por minuto) e
+    gravada em avg_frame_rate, arredondada para a taxa comum mais próxima (até 3%) ou para inteiro."""
+    for s in probe.get("streams", []):
+        if s.get("codec_type") != "video" or (s.get("disposition") or {}).get("attached_pic"):
+            continue
+        try:
+            n, d = (s.get("avg_frame_rate") or "0/0").split("/")
+            media = float(n) / float(d) if float(d) else 0.0
+        except ValueError:
+            media = 0.0
+        if 0 < media <= 240:
+            continue
+        try:
+            r = subprocess.run([FFPROBE, "-v", "error", "-select_streams", f"{s.get('index', 0)}",
+                                "-show_entries", "packet=pts_time", "-of", "csv=p=0", str(path)],
+                               capture_output=True, text=True, timeout=120)
+            pts = sorted(float(x) for x in r.stdout.split() if x not in ("", "N/A"))
+        except (OSError, subprocess.TimeoutExpired, ValueError):
+            continue
+        if len(pts) < 3 or pts[-1] <= pts[0]:
+            continue
+        fps = (len(pts) - 1) / (pts[-1] - pts[0])
+        perto = min(_TAXAS_COMUNS, key=lambda c: abs(c - fps))
+        fps = perto if abs(perto - fps) / fps <= 0.03 else max(1, round(fps))
+        s["avg_frame_rate"] = {23.976: "24000/1001", 29.97: "30000/1001", 59.94: "60000/1001",
+                               119.88: "120000/1001"}.get(fps, f"{int(fps)}/1")
+        if _fps_stream({"r_frame_rate": s.get("r_frame_rate", "0/0")}) > 240:
+            s["r_frame_rate"] = s["avg_frame_rate"]
+        s["ai_editor_fps_medido"] = True
 
 
 def faixas_audio(probe: dict) -> list[dict]:
@@ -658,7 +698,19 @@ def ffmpeg_livre(doc: Documento, argumentos: str, descricao: str, extensao: str 
 def extrair_quadro(arquivo: Path, t: float, largura: int, destino: Path) -> Path:
     cmd = FFMPEG + ["-ss", f"{t:.3f}", "-i", str(arquivo), "-frames:v", "1",
                     "-vf", f"scale='min({largura},iw)':-2", "-q:v", "3", str(destino)]
-    rodar(cmd)
+    try:
+        rodar(cmd)
+        if destino.is_file() and destino.stat().st_size:
+            return destino
+    except ErroFFmpeg:
+        pass
+    # t no fim do vídeo (ou depois do último quadro, comum em VFR): mostra o ÚLTIMO quadro
+    # (-update 1 regrava a imagem a cada quadro do último segundo; fica o último)
+    destino.unlink(missing_ok=True)
+    rodar(FFMPEG + ["-sseof", "-1", "-i", str(arquivo), "-update", "1",
+                    "-vf", f"scale='min({largura},iw)':-2", "-q:v", "3", str(destino)])
+    if not (destino.is_file() and destino.stat().st_size):
+        raise ErroFFmpeg(f"não há quadro de vídeo em {fmt_tempo(t)}")
     return destino
 
 
