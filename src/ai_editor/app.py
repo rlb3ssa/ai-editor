@@ -331,9 +331,10 @@ class LinhaFaixa(QWidget):
         hl.addWidget(divisor)
         hl.addSpacing(6)
         cl = QVBoxLayout()
-        cl.setContentsMargins(0, 4, 0, 1)  # controles colados embaixo
-        cl.setSpacing(0)
+        cl.setContentsMargins(0, 0, 0, 0)
+        cl.setSpacing(1)
         hl.addLayout(cl, 1)
+        cl.addStretch(1)  # stretch acima e abaixo: o bloco fica centralizado na vertical
         # linha 1: detalhes centralizados ("Codec: aac    Channels: 2")
         campos = [("Codec", info.get("codec")), ("Channels", info.get("demux-channel-count")),
                   ("Language", info.get("lang"))]
@@ -346,7 +347,6 @@ class LinhaFaixa(QWidget):
         if info.get("title"):
             rot.setToolTip(info["title"])
         cl.addWidget(rot)
-        cl.addStretch(1)
         # linha 2: mudo, solo e volume
         lin = QHBoxLayout()
         self.b_mudo = self._botao("volume-off", "Mudo", "mudo")
@@ -361,6 +361,7 @@ class LinhaFaixa(QWidget):
         lin.addWidget(self.b_solo)
         lin.addWidget(self.vol)
         cl.addLayout(lin)
+        cl.addStretch(1)
         lay.addWidget(cab)
         self.onda = Onda(janela, idx)
         lay.addWidget(self.onda, 1)
