@@ -40,7 +40,7 @@ e aparece na barra de status. Erros em tempo de execução: ver o log (stderr do
 ```
 Comandos úteis: `estado`, `depurar` (props do mpv; `extras=[...]`), `capturar` (print da janela via Qt, inclusive o vídeo, mesmo com a janela atrás de outras →
 `$XDG_RUNTIME_DIR/ai-editor-dev/captura.png`), `abrir`, `pausar`, `pular`,
-`marcar`, `zoom_video`, `recarregar`, `sair`.
+`marcar`, `zoom_video`, `editar_tempo` (com `valor`, vai ao tempo), `recarregar`, `sair`.
 
 ## Regras importantes
 - **Nunca** use `pkill -f ai-editor`/`claude-player` nem `kill` por padrão de nome: mata o servidor MCP e o

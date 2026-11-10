@@ -13,7 +13,7 @@ os.environ.setdefault("QT_XCB_GL_INTEGRATION", "xcb_egl")
 os.environ.setdefault("QT_API", "pyside6")
 
 import numpy as np
-from PySide6.QtCore import (QFileSystemWatcher, QObject, QPointF, QRectF, QRunnable, QSize, Qt, QThreadPool, QTimer,
+from PySide6.QtCore import (QEvent, QFileSystemWatcher, QObject, QPointF, QRectF, QRunnable, QSize, Qt, QThreadPool, QTimer,
                             Signal)
 from PySide6.QtGui import (QAction, QGuiApplication, QOpenGLContext, QColor, QFont, QKeySequence, QPainter, QPalette, QPen,
                            QPolygonF, QShortcut)
@@ -30,7 +30,7 @@ from . import cliente
 from .core import CACHE_DIR, DEV, FONTE_DIR, NOME, RUNTIME_DIR, SOCKET_PATH, TITULO, Documento, fmt_tempo, parse_tempo
 from .ondas import PICOS_POR_SEG, picos
 
-CAB = 216  # largura do cabeçalho à esquerda das faixas
+CAB = 180  # largura do cabeçalho à esquerda das faixas
 COR_FUNDO = QColor("#15171c")
 COR_TRILHA = QColor("#1f232b")
 COR_ONDA = QColor("#4fa3ff")
@@ -591,14 +591,6 @@ class Janela(QMainWindow):
         sep()
         btn("ray-start-arrow", "Marcar entrada IN (I)", lambda: self.marcar(entrada=self.pos)).setIcon(icone("ray-start-arrow", "#ffc400"))
         btn("ray-end-arrow", "Marcar saída OUT (O)", lambda: self.marcar(saida=self.pos)).setIcon(icone("ray-end-arrow", "#ffc400"))
-        sep()
-        bl.addSpacing(8)
-        self.ir = QLineEdit()
-        self.ir.setPlaceholderText("ir para 1:23.456")
-        self.ir.addAction(icone("crosshairs-gps", "#8b949e"), QLineEdit.LeadingPosition)
-        self.ir.setFixedWidth(150)
-        self.ir.returnPressed.connect(self._ir_para)
-        bl.addWidget(self.ir)
         bl.addStretch(1)
         self.vel = QComboBox()
         self.vel.addItems(["0.25x", "0.5x", "0.75x", "1x", "1.25x", "1.5x", "2x"])
@@ -637,7 +629,8 @@ class Janela(QMainWindow):
         lr = QHBoxLayout()
         lr.setContentsMargins(0, 0, 0, 0)
         lr.setSpacing(0)
-        # canto à esquerda da régua: tempo atual centralizado + "• N fps"; atual / total na dica
+        # canto à esquerda da régua: tempo atual centralizado; atual / total na dica.
+        # Duplo clique (ou Ctrl+G) transforma o tempo num campo para ir a outro instante.
         canto = QWidget()
         canto.setObjectName("canto")
         canto.setFixedWidth(CAB)
@@ -654,15 +647,19 @@ class Janela(QMainWindow):
         f.setWeight(QFont.DemiBold)
         self.l_tempo.setFont(f)
         self.l_tempo.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.l_fps = QLabel("")
-        self.l_fps.setObjectName("fps")
-        f = QFont(mono)
-        f.setPointSize(9)
-        self.l_fps.setFont(f)
-        lc.addStretch(1)
-        lc.addWidget(self.l_tempo, 0, Qt.AlignVCenter)
-        lc.addWidget(self.l_fps, 0, Qt.AlignVCenter)
-        lc.addStretch(1)
+        self.l_tempo.setAlignment(Qt.AlignCenter)
+        self.l_tempo.installEventFilter(self)
+        canto.installEventFilter(self)
+        self.ir = QLineEdit()
+        self.ir.setObjectName("ir")
+        self.ir.setFont(f)
+        self.ir.setAlignment(Qt.AlignCenter)
+        self.ir.setToolTip("Digite o tempo e Enter: 83.456 · 1:23.456 · 1500ms · in · out · atual-2 (Esc cancela)")
+        self.ir.returnPressed.connect(self._ir_para)
+        self.ir.installEventFilter(self)
+        self.ir.hide()
+        lc.addWidget(self.l_tempo, 1)
+        lc.addWidget(self.ir, 1)
         self.canto = canto
         lr.addWidget(canto)
         self.regua = Regua(self)
@@ -711,7 +708,7 @@ class Janela(QMainWindow):
             ("End", lambda: self.pular(self.visao.dur)), ("Ctrl+O", self.dialogo_abrir),
             ("Ctrl+S", self.salvar), ("Ctrl+Z", self.desfazer),
             ("+", lambda: self.visao.zoom(0.5, self.pos)), ("-", lambda: self.visao.zoom(2, self.pos)),
-            ("0", lambda: self.visao.zoom(1e9, 0)), ("F", self._tela_cheia), ("M", self._alternar_mudo_geral),
+            ("0", lambda: self.visao.zoom(1e9, 0)), ("F", self._tela_cheia), ("M", self._alternar_mudo_geral), ("Ctrl+G", self.editar_tempo),
         ]:
             QShortcut(QKeySequence(tecla), self, fn)
 
@@ -819,13 +816,40 @@ class Janela(QMainWindow):
             self.marca_in, self.marca_out = self.marca_out, self.marca_in
         self._repintar()
 
+    def editar_tempo(self):
+        """Troca o tempo do canto da régua por um campo editável já preenchido e selecionado."""
+        self.ir.setText(fmt_tempo(self.pos))
+        self.l_tempo.hide()
+        self.ir.show()
+        self.ir.setFocus()
+        self.ir.selectAll()
+
+    def _fechar_edicao_tempo(self):
+        if self.ir.isVisible():
+            self.ir.hide()
+            self.l_tempo.show()
+            self.setFocus()
+
     def _ir_para(self):
         try:
             self.pular(parse_tempo(self.ir.text(), self.estado()))
-            self.ir.clear()
-            self.setFocus()
+            self._fechar_edicao_tempo()
         except Exception as e:  # noqa: BLE001
             self.statusBar().showMessage(f"tempo inválido: {e}", 4000)
+            self.ir.selectAll()
+
+    def eventFilter(self, obj, ev):
+        t = ev.type()
+        if obj in (self.l_tempo, getattr(self, "canto", None)) and t == QEvent.MouseButtonDblClick:
+            self.editar_tempo()
+            return True
+        if obj is self.ir:
+            if t == QEvent.KeyPress and ev.key() == Qt.Key_Escape:
+                self._fechar_edicao_tempo()
+                return True
+            if t == QEvent.FocusOut:
+                QTimer.singleShot(0, self._fechar_edicao_tempo)
+        return super().eventFilter(obj, ev)
 
     def _alternar_mudo_geral(self):
         mudo = not self._get("mute", False)
@@ -992,10 +1016,6 @@ class Janela(QMainWindow):
             self.canto.setToolTip(dica)
         fps = self.fps
         self.tela.mostrar_quadro(int(round(self.pos * fps)) if fps else None, fps)
-        txt_fps = f"• {fps:.2f}".rstrip("0").rstrip(".") + " fps" if fps else ""
-        if self.l_fps.text() != txt_fps:
-            self.l_fps.setText(txt_fps)
-            self.l_fps.setVisible(bool(txt_fps))
         self._repintar()
 
     def _repintar(self):
@@ -1099,6 +1119,12 @@ class Janela(QMainWindow):
             destino = a.get("arquivo") or str(RUNTIME_DIR / "captura.png")
             self.grab().save(destino)
             return {"arquivo": destino}
+        elif cmd == "editar_tempo":
+            # abre o campo de tempo do canto da régua; com "valor", digita e confirma (como Enter)
+            self.editar_tempo()
+            if "valor" in a:
+                self.ir.setText(str(a["valor"]))
+                self._ir_para()
         elif cmd == "zoom_video":
             self.tela.definir(float(a.get("zoom", 0)), float(a.get("x", 0)), float(a.get("y", 0)))
         elif cmd == "mix":
@@ -1241,7 +1267,7 @@ QToolButton#salvar:hover { background: #3a80d6; }
 QToolButton#salvar:disabled { background: #262b34; color: #4a4f5a; }
 QWidget#canto { background: #0d1117; border-right: 1px solid #21262d; }
 QLabel#tempo { color: #e6edf3; }
-QLabel#fps { color: #8b949e; }
+QLineEdit#ir { background: #15171c; border: 1px solid #4fa3ff; border-radius: 4px; padding: 1px 2px; color: #e6edf3; }
 QLabel#sutil { color: #6e7681; }
 QLabel#quadro { color: #e6edf3; background: rgba(13, 17, 23, 170); border-radius: 4px; padding: 3px 7px; }
 QLabel#versao { color: #8b949e; padding-right: 6px; }
