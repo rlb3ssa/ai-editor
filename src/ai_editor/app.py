@@ -739,6 +739,13 @@ class Janela(QMainWindow):
         self.vel.setToolTip("Velocidade")
         self.vel.currentTextChanged.connect(lambda s: self._set("speed", float(s[:-1])))
         bl.addWidget(self.vel)
+        # quadros por segundo que a velocidade escolhida representa (fps do vídeo × velocidade)
+        self.l_fps_vel = QLabel("")
+        self.l_fps_vel.setObjectName("fps_vel")
+        self.l_fps_vel.setMinimumWidth(64)  # largura estável: o centro da barra não "pula" ao trocar o valor
+        self.l_fps_vel.setToolTip("Quadros por segundo nesta velocidade (fps do vídeo × velocidade)")
+        bl.addSpacing(4)
+        bl.addWidget(self.l_fps_vel)
         bl.addSpacing(8)
         self.b_vol = btn("volume-high", "Mudo geral (M)", self._alternar_mudo_geral, tam=18)
         self.vol = QSlider(Qt.Horizontal)
@@ -1236,6 +1243,13 @@ class Janela(QMainWindow):
             self.canto.setToolTip(dica)
         fps = self.fps
         self.tela.mostrar_quadro(self.quadro_atual(), fps)
+        if fps:
+            v = fps * float(self._get("speed", 1.0) or 1.0)
+            txt = f"{v:.2f}".rstrip("0").rstrip(".") + " fps"
+        else:
+            txt = ""
+        if self.l_fps_vel.text() != txt:
+            self.l_fps_vel.setText(txt)
         self._repintar()
 
     def _repintar(self):
@@ -1331,7 +1345,15 @@ class Janela(QMainWindow):
         elif cmd == "marcar":
             return self.marcar(adicionar=a.get("adicionar"), remover=a.get("remover"), limpar=a.get("limpar", False))
         elif cmd == "velocidade":
-            self._set("speed", float(a["v"]))
+            v = float(a["v"])
+            self._set("speed", v)
+            # mantém a caixa de velocidade coerente (acrescenta o valor se não estiver na lista)
+            txt = f"{v:g}x"
+            if self.vel.findText(txt) < 0:
+                self.vel.addItem(txt)
+            self.vel.blockSignals(True)
+            self.vel.setCurrentText(txt)
+            self.vel.blockSignals(False)
         elif cmd == "zoom":
             ini, fim = float(a["ini"]), float(a["fim"])
             self.visao._por(ini, max(fim - ini, 0.05))
@@ -1519,6 +1541,7 @@ QToolButton#info_video { background: rgba(13, 17, 23, 170); border: none; border
 QToolButton#info_video:hover { background: rgba(48, 54, 61, 210); }
 QLabel#quadro { color: #e6edf3; background: rgba(13, 17, 23, 170); border-radius: 4px; padding: 3px 7px; }
 QLabel#versao { color: #8b949e; padding-right: 6px; }
+QLabel#fps_vel { color: #8b949e; font-size: 12px; }
 QLineEdit { background: #15171c; border: 1px solid #2f3540; border-radius: 6px; padding: 4px 6px; color: #c9d1d9; }
 QLineEdit:focus { border-color: #4fa3ff; }
 QComboBox { background: #15171c; border: 1px solid #2f3540; border-radius: 6px; padding: 3px 8px; min-width: 56px; }

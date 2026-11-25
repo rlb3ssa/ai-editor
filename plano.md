@@ -989,6 +989,11 @@ Lista completa e links de código-fonte: `packaging/LICENCAS_TERCEIROS.md` e `CO
   band-split a reimplementar); OpenVINO IR (outro runtime); modelos UVR/MDX da comunidade e `MansfieldPlumbing`/
   `MrCitron` (cc-by-nc ou sem licença). Padrões por medição: limpeza Wiener desligada, DeepFilterNet na voz
   falada (`so_voz`), qualidade alta.
+- 2026-11-10: contador e passo de quadros da janela usam a lista real de quadros (ffprobe em segundo plano), não
+  tempo × fps: gravações de tela (VFR) repetiam/pulavam números. WebM/MKV com r_frame_rate = escala de tempo
+  (1000/1) usam a taxa média medida. Ao lado da velocidade, a janela mostra os fps equivalentes (fps × velocidade).
+- 2026-11-25: GitHub Actions da conta bloqueado por cobrança: CI e Release de v0.1.0 nunca rodaram (sem Release
+  publicada). Resolver a cobrança e reexecutar, ou publicar o AppImage manualmente.
 
 ## 8. Questões em aberto
 - Manter o idioma da interface em português ou adicionar i18n desde já?

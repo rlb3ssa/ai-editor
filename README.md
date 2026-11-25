@@ -31,6 +31,8 @@ Claude Desktop...); sem ele, é um bom player com exportação. Por enquanto, s�
 
 ## O que faz
 - Reprodução fluida com aceleração por hardware (libmpv), quadro a quadro, zoom no vídeo e na régua.
+- Contador de quadros exato mesmo em vídeos de taxa variável (gravações de tela, celular); ao mudar a velocidade,
+  mostra os quadros por segundo equivalentes.
 - Ondas de áudio por faixa, volume/mudo/solo por faixa, mixagem.
 - Marcas ilimitadas na régua; cada par de marcas forma um trecho colorido que a IA enxerga.
 - Edição não destrutiva: cada edição vira uma versão temporária; o original só é substituído quando você manda salvar
